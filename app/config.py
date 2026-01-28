@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     secret_key: str = "change-me"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    gigachat_api_key: str = ""
+    gigachat_model: str = "GigaChat"
+    gigachat_base_url: str = "https://gigachat.devices.sberbank.ru/api/v1"
 
     class Config:
         env_file = ".env"

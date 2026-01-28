@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +17,7 @@ from app.services.search import llm_search
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-templates = Jinja2Templates(directory="app/admin/templates")
+templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 

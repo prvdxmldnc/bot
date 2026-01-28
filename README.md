@@ -41,14 +41,18 @@
 
 ## LLM-поиск
 
-Для LLM-поиска укажите в `.env` ключ и модель:
+Для LLM-поиска укажите в `.env` ключ и модель. Приоритет: GigaChat → OpenAI → локальный поиск.
 
 ```
+GIGACHAT_API_KEY=ваш_токен
+GIGACHAT_MODEL=GigaChat
+GIGACHAT_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
+
 OPENAI_API_KEY=ваш_ключ
 OPENAI_MODEL=gpt-4o-mini
 ```
 
-Если ключ не задан, поиск использует локальный поиск по каталогу.
+Если ключи не заданы, поиск использует локальный поиск по каталогу.
 
 ## Systemd (автозапуск после перезагрузки)
 

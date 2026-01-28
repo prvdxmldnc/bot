@@ -11,6 +11,25 @@ from app.models import Product
 
 
 async def llm_search(session: AsyncSession, query: str) -> list[dict[str, Any]]:
+    if settings.gigachat_api_key:
+        payload = {
+            "model": settings.gigachat_model,
+            "messages": [
+                {"role": "system", "content": "Ты помощник по каталогу. Верни список подходящих товаров."},
+                {"role": "user", "content": query},
+            ],
+            "temperature": 0.2,
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{settings.gigachat_base_url}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {settings.gigachat_api_key}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        return [{"title": content, "source": "gigachat"}]
     if settings.openai_api_key:
         payload = {
             "model": settings.openai_model,

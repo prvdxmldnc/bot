@@ -1,11 +1,17 @@
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.bot.keyboards import catalog_keyboard, main_menu_keyboard, products_keyboard, start_keyboard
+from app.bot.keyboards import (
+    catalog_keyboard,
+    main_menu_keyboard,
+    products_keyboard,
+    registration_done_keyboard,
+    start_keyboard,
+)
 from app.bot.states import LoginStates, RegistrationStates
 from app.config import settings
 from app.crud import (
@@ -35,8 +41,9 @@ async def start(message: Message) -> None:
     )
 
 
-@router.message(F.text == "Регистрация")
+@router.message(StateFilter("*"), F.text == "Регистрация")
 async def registration_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(RegistrationStates.fio)
     await message.answer("Введите ваше ФИО:")
 
@@ -117,11 +124,20 @@ async def registration_password(message: Message, state: FSMContext) -> None:
             session.add(OrgMember(org_id=org.id, user_id=user.id, role_in_org="owner"))
         await session.commit()
     await state.clear()
-    await message.answer("Регистрация завершена. Добро пожаловать!", reply_markup=main_menu_keyboard())
+    await message.answer(
+        "Регистрация завершена. Нажмите кнопку ниже, чтобы открыть меню.",
+        reply_markup=registration_done_keyboard(),
+    )
 
 
-@router.message(F.text == "Вход")
+@router.message(F.text == "Регистрация завершена")
+async def registration_done(message: Message) -> None:
+    await message.answer("Добро пожаловать!", reply_markup=main_menu_keyboard())
+
+
+@router.message(StateFilter("*"), F.text == "Вход")
 async def login_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(LoginStates.phone)
     await message.answer("Введите телефон:")
 

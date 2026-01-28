@@ -24,6 +24,14 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def registration_done_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Регистрация завершена")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 def catalog_keyboard(categories: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton(text=name, callback_data=f"cat:{cat_id}")] for cat_id, name in categories]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
