@@ -1,4 +1,3 @@
-from contextlib import asynccontextmanager
 from time import sleep
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -25,7 +24,6 @@ async def init_db() -> None:
             delay = min(delay * 2, 10)
 
 
-@asynccontextmanager
 async def get_session() -> AsyncSession:
     async with SessionLocal() as session:
         yield session
