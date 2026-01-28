@@ -14,7 +14,11 @@
     <h2>Результаты ({{ model }})</h2>
     <ul>
       {% for item in results %}
-        <li>{{ item.title }} ({{ item.source }})</li>
+        <li>
+          {{ item.title }}
+          {% if item.qty %} — {{ item.qty }}{% endif %}
+          ({{ item.source }})
+        </li>
       {% endfor %}
     </ul>
   {% endif %}
