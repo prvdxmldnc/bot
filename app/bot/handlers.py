@@ -34,6 +34,28 @@ from app.utils.security import hash_password, verify_password
 router = Router()
 
 
+def _normalized_text(message: Message) -> str:
+    return (message.text or "").strip().lower()
+
+
+def _is_login_command(message: Message) -> bool:
+    return _normalized_text(message) == "вход"
+
+
+def _is_registration_command(message: Message) -> bool:
+    return _normalized_text(message) == "регистрация"
+
+
+async def _handle_auth_interrupts(message: Message, state: FSMContext) -> bool:
+    if _is_login_command(message):
+        await login_start(message, state)
+        return True
+    if _is_registration_command(message):
+        await registration_start(message, state)
+        return True
+    return False
+
+
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(
@@ -42,7 +64,7 @@ async def start(message: Message) -> None:
     )
 
 
-@router.message(StateFilter("*"), lambda msg: msg.text and msg.text.strip().lower() == "регистрация")
+@router.message(StateFilter("*"), _is_registration_command)
 async def registration_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(RegistrationStates.fio)
@@ -51,6 +73,8 @@ async def registration_start(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.fio)
 async def registration_fio(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     await state.update_data(fio=message.text)
     await state.set_state(RegistrationStates.org_name)
     await message.answer("Введите название организации или напишите 'Частное лицо':")
@@ -58,6 +82,8 @@ async def registration_fio(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.org_name)
 async def registration_org(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     await state.update_data(org_name=message.text)
     await state.set_state(RegistrationStates.phone)
     await message.answer("Введите телефон в формате +79998887766:")
@@ -65,6 +91,8 @@ async def registration_org(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.phone)
 async def registration_phone(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     await state.update_data(phone=message.text)
     await state.set_state(RegistrationStates.address)
     await message.answer("Введите адрес доставки:")
@@ -72,6 +100,8 @@ async def registration_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.address)
 async def registration_address(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     await state.update_data(address=message.text)
     await state.set_state(RegistrationStates.work_time)
     await message.answer("Введите время работы (например 09:00-18:00) или 'Круглосуточно':")
@@ -79,6 +109,8 @@ async def registration_address(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.work_time)
 async def registration_work_time(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     is_24h = message.text.lower() == "круглосуточно"
     await state.update_data(work_time=message.text, is_24h=is_24h)
     await state.set_state(RegistrationStates.email)
@@ -87,6 +119,8 @@ async def registration_work_time(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.email)
 async def registration_email(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     email = None if message.text.strip() == "-" else message.text
     await state.update_data(email=email)
     await state.set_state(RegistrationStates.password)
@@ -95,6 +129,8 @@ async def registration_email(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.password)
 async def registration_password(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     data = await state.get_data()
     org_name = data["org_name"]
     async with get_session() as session:
@@ -131,12 +167,12 @@ async def registration_password(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(lambda msg: msg.text and msg.text.strip().lower() == "регистрация завершена")
+@router.message(lambda msg: _normalized_text(msg) == "регистрация завершена")
 async def registration_done(message: Message) -> None:
     await message.answer("Теперь выполните вход по телефону и паролю.", reply_markup=auth_keyboard())
 
 
-@router.message(StateFilter("*"), lambda msg: msg.text and msg.text.strip().lower() == "вход")
+@router.message(StateFilter("*"), _is_login_command)
 async def login_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(LoginStates.phone)
@@ -145,6 +181,8 @@ async def login_start(message: Message, state: FSMContext) -> None:
 
 @router.message(LoginStates.phone)
 async def login_phone(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     await state.update_data(phone=message.text)
     await state.set_state(LoginStates.password)
     await message.answer("Введите пароль:")
@@ -152,6 +190,8 @@ async def login_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(LoginStates.password)
 async def login_password(message: Message, state: FSMContext) -> None:
+    if await _handle_auth_interrupts(message, state):
+        return
     data = await state.get_data()
     async with get_session() as session:
         user = await get_user_by_phone(session, data["phone"])
