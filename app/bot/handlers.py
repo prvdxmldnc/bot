@@ -41,7 +41,7 @@ async def start(message: Message) -> None:
     )
 
 
-@router.message(StateFilter("*"), F.text == "Регистрация")
+@router.message(StateFilter("*"), lambda msg: msg.text and msg.text.strip().lower() == "регистрация")
 async def registration_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(RegistrationStates.fio)
@@ -130,12 +130,12 @@ async def registration_password(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(F.text == "Регистрация завершена")
+@router.message(lambda msg: msg.text and msg.text.strip().lower() == "регистрация завершена")
 async def registration_done(message: Message) -> None:
     await message.answer("Добро пожаловать!", reply_markup=main_menu_keyboard())
 
 
-@router.message(StateFilter("*"), F.text == "Вход")
+@router.message(StateFilter("*"), lambda msg: msg.text and msg.text.strip().lower() == "вход")
 async def login_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(LoginStates.phone)
