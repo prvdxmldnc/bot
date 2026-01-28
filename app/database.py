@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from time import sleep
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -10,8 +11,18 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 
 async def init_db() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    retries = 10
+    delay = 1
+    for attempt in range(retries):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            return
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            sleep(delay)
+            delay = min(delay * 2, 10)
 
 
 @asynccontextmanager
