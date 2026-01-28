@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards import (
     catalog_keyboard,
+    auth_keyboard,
     main_menu_keyboard,
     products_keyboard,
     registration_done_keyboard,
@@ -125,14 +126,14 @@ async def registration_password(message: Message, state: FSMContext) -> None:
         await session.commit()
     await state.clear()
     await message.answer(
-        "Регистрация завершена. Нажмите кнопку ниже, чтобы открыть меню.",
-        reply_markup=registration_done_keyboard(),
+        "Регистрация завершена. Теперь выполните вход по телефону и паролю.",
+        reply_markup=auth_keyboard(),
     )
 
 
 @router.message(lambda msg: msg.text and msg.text.strip().lower() == "регистрация завершена")
 async def registration_done(message: Message) -> None:
-    await message.answer("Добро пожаловать!", reply_markup=main_menu_keyboard())
+    await message.answer("Теперь выполните вход по телефону и паролю.", reply_markup=auth_keyboard())
 
 
 @router.message(StateFilter("*"), lambda msg: msg.text and msg.text.strip().lower() == "вход")
