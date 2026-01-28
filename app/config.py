@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     admin_phone: str = "+89047678710"
     manager_phone: str = "+7999999999"
     secret_key: str = "change-me"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
 
     class Config:
         env_file = ".env"

@@ -2,10 +2,12 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin.routes import router as admin_router
 from app.database import get_session, init_db
 from app.models import Category, Organization, Order, Product, User
 
 app = FastAPI(title="Partner-M API")
+app.include_router(admin_router)
 
 
 @app.on_event("startup")

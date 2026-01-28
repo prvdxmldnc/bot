@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Каталог</title>
+</head>
+<body>
+  <h1>Каталог</h1>
+  <form action="/admin/catalog/import" method="post" enctype="multipart/form-data">
+    <label>Импорт CSV:</label>
+    <input type="file" name="file" />
+    <button type="submit">Загрузить</button>
+  </form>
+  <h2>Категории</h2>
+  <ul>
+    {% for category in categories %}
+      <li>{{ category.title_ru }}</li>
+    {% else %}
+      <li>Категорий нет</li>
+    {% endfor %}
+  </ul>
+  <h2>Товары</h2>
+  <ul>
+    {% for product in products %}
+      <li>{{ product.title_ru }} — {{ product.price }}</li>
+    {% else %}
+      <li>Товаров нет</li>
+    {% endfor %}
+  </ul>
+  <a href="/admin">Назад</a>
+</body>
+</html>
