@@ -27,7 +27,7 @@ from app.crud import (
     list_products_by_category,
     list_subcategories,
 )
-from app.database import get_session
+from app.database import get_session_context
 from app.models import OrgMember, Product, Thread, User
 from app.utils.security import hash_password, verify_password
 
@@ -133,7 +133,7 @@ async def registration_password(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     org_name = data["org_name"]
-    async with get_session() as session:
+    async with get_session_context() as session:
         if await get_user_by_phone(session, data["phone"]):
             await message.answer("Пользователь с таким телефоном уже существует. Попробуйте вход.")
             await state.clear()
@@ -193,7 +193,7 @@ async def login_password(message: Message, state: FSMContext) -> None:
     if await _handle_auth_interrupts(message, state):
         return
     data = await state.get_data()
-    async with get_session() as session:
+    async with get_session_context() as session:
         user = await get_user_by_phone(session, data["phone"])
         if not user or not verify_password(message.text, user.password_hash):
             await message.answer("Неверные данные. Попробуйте снова.")
@@ -208,7 +208,7 @@ async def login_password(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "Каталог")
 @router.message(F.text == "Открыть каталог")
 async def show_catalog(message: Message) -> None:
-    async with get_session() as session:
+    async with get_session_context() as session:
         categories = await list_root_categories(session)
     if not categories:
         await message.answer("Каталог пуст. Обратитесь к менеджеру.")
@@ -222,7 +222,7 @@ async def show_catalog(message: Message) -> None:
 @router.callback_query(F.data.startswith("cat:"))
 async def category_click(callback) -> None:
     cat_id = int(callback.data.split(":")[1])
-    async with get_session() as session:
+    async with get_session_context() as session:
         subcats = await list_subcategories(session, cat_id)
         products = await list_products_by_category(session, cat_id)
     if subcats:
@@ -243,7 +243,7 @@ async def category_click(callback) -> None:
 @router.callback_query(F.data.startswith("prod:"))
 async def product_click(callback) -> None:
     prod_id = int(callback.data.split(":")[1])
-    async with get_session() as session:
+    async with get_session_context() as session:
         result = await session.execute(select(Product).where(Product.id == prod_id))
         product = result.scalar_one_or_none()
     if not product:
@@ -257,7 +257,7 @@ async def product_click(callback) -> None:
 
 @router.message(F.text == "Заказы")
 async def list_orders(message: Message) -> None:
-    async with get_session() as session:
+    async with get_session_context() as session:
         user = await get_user_by_tg_id(session, message.from_user.id)
         if not user:
             await message.answer("Сначала выполните вход.")
@@ -272,7 +272,7 @@ async def list_orders(message: Message) -> None:
 
 @router.message(F.text == "Мои вопросы")
 async def list_questions(message: Message) -> None:
-    async with get_session() as session:
+    async with get_session_context() as session:
         user = await get_user_by_tg_id(session, message.from_user.id)
         if not user:
             await message.answer("Сначала выполните вход.")
@@ -301,7 +301,7 @@ async def invite_worker(message: Message) -> None:
 
 @router.message(F.text == "Аккаунт")
 async def account(message: Message) -> None:
-    async with get_session() as session:
+    async with get_session_context() as session:
         user = await get_user_by_tg_id(session, message.from_user.id)
     if not user:
         await message.answer("Сначала выполните вход.")
@@ -313,7 +313,7 @@ async def account(message: Message) -> None:
 
 @router.message(F.text)
 async def handle_text_order(message: Message) -> None:
-    async with get_session() as session:
+    async with get_session_context() as session:
         user = await get_user_by_tg_id(session, message.from_user.id)
         if not user:
             await message.answer("Сначала выполните вход.")
