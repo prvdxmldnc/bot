@@ -3,6 +3,7 @@ from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards import (
@@ -44,6 +45,15 @@ def _is_login_command(message: Message) -> bool:
 
 def _is_registration_command(message: Message) -> bool:
     return _normalized_text(message) == "регистрация"
+
+
+def _normalize_phone(raw: str) -> str:
+    return raw.strip().replace(" ", "")
+
+
+def _is_valid_phone(raw: str) -> bool:
+    normalized = _normalize_phone(raw)
+    return normalized.startswith("+") and len(normalized) >= 11
 
 
 async def _handle_auth_interrupts(message: Message, state: FSMContext) -> bool:
@@ -93,7 +103,11 @@ async def registration_org(message: Message, state: FSMContext) -> None:
 async def registration_phone(message: Message, state: FSMContext) -> None:
     if await _handle_auth_interrupts(message, state):
         return
-    await state.update_data(phone=message.text)
+    phone = _normalize_phone(message.text or "")
+    if not _is_valid_phone(phone):
+        await message.answer("Телефон некорректный. Введите в формате +79998887766:")
+        return
+    await state.update_data(phone=phone)
     await state.set_state(RegistrationStates.address)
     await message.answer("Введите адрес доставки:")
 
@@ -154,12 +168,18 @@ async def registration_password(message: Message, state: FSMContext) -> None:
             role=role,
             tg_id=message.from_user.id,
         )
-        session.add(user)
-        await session.flush()
-        if org_name.lower() != "частное лицо":
-            org = await create_organization(session, org_name, user.id)
-            session.add(OrgMember(org_id=org.id, user_id=user.id, role_in_org="owner"))
-        await session.commit()
+        try:
+            session.add(user)
+            await session.flush()
+            if org_name.lower() != "частное лицо":
+                org = await create_organization(session, org_name, user.id)
+                session.add(OrgMember(org_id=org.id, user_id=user.id, role_in_org="owner"))
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            await message.answer("Не удалось создать пользователя. Проверьте телефон и попробуйте снова.")
+            await state.clear()
+            return
     await state.clear()
     await message.answer(
         "Регистрация завершена. Теперь выполните вход по телефону и паролю.",
@@ -183,7 +203,11 @@ async def login_start(message: Message, state: FSMContext) -> None:
 async def login_phone(message: Message, state: FSMContext) -> None:
     if await _handle_auth_interrupts(message, state):
         return
-    await state.update_data(phone=message.text)
+    phone = _normalize_phone(message.text or "")
+    if not _is_valid_phone(phone):
+        await message.answer("Телефон некорректный. Введите в формате +79998887766:")
+        return
+    await state.update_data(phone=phone)
     await state.set_state(LoginStates.password)
     await message.answer("Введите пароль:")
 
@@ -196,7 +220,7 @@ async def login_password(message: Message, state: FSMContext) -> None:
     async with get_session_context() as session:
         user = await get_user_by_phone(session, data["phone"])
         if not user or not verify_password(message.text, user.password_hash):
-            await message.answer("Неверные данные. Попробуйте снова.")
+            await message.answer("Неверный телефон или пароль. Если нет аккаунта — нажмите «Регистрация».")
             await state.clear()
             return
         user.tg_id = message.from_user.id
