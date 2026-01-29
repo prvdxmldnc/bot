@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -33,6 +35,7 @@ from app.models import OrgMember, Product, Thread, User
 from app.utils.security import hash_password, verify_password
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _normalized_text(message: Message) -> str:
@@ -78,6 +81,7 @@ async def start(message: Message) -> None:
 async def registration_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(RegistrationStates.fio)
+    logger.info("Registration started for tg_id=%s", message.from_user.id)
     await message.answer("Введите ваше ФИО:")
 
 
@@ -149,6 +153,7 @@ async def registration_password(message: Message, state: FSMContext) -> None:
     org_name = data["org_name"]
     async with get_session_context() as session:
         if await get_user_by_phone(session, data["phone"]):
+            logger.info("Registration blocked: phone exists %s", data["phone"])
             await message.answer("Пользователь с таким телефоном уже существует. Попробуйте вход.")
             await state.clear()
             return
@@ -175,8 +180,10 @@ async def registration_password(message: Message, state: FSMContext) -> None:
                 org = await create_organization(session, org_name, user.id)
                 session.add(OrgMember(org_id=org.id, user_id=user.id, role_in_org="owner"))
             await session.commit()
+            logger.info("User registered id=%s phone=%s", user.id, user.phone)
         except IntegrityError:
             await session.rollback()
+            logger.exception("Registration failed for phone=%s", data["phone"])
             await message.answer("Не удалось создать пользователя. Проверьте телефон и попробуйте снова.")
             await state.clear()
             return
@@ -196,6 +203,7 @@ async def registration_done(message: Message) -> None:
 async def login_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(LoginStates.phone)
+    logger.info("Login started for tg_id=%s", message.from_user.id)
     await message.answer("Введите телефон:")
 
 
@@ -220,11 +228,13 @@ async def login_password(message: Message, state: FSMContext) -> None:
     async with get_session_context() as session:
         user = await get_user_by_phone(session, data["phone"])
         if not user or not verify_password(message.text, user.password_hash):
+            logger.info("Login failed for phone=%s", data["phone"])
             await message.answer("Неверный телефон или пароль. Если нет аккаунта — нажмите «Регистрация».")
             await state.clear()
             return
         user.tg_id = message.from_user.id
         await session.commit()
+        logger.info("Login success user_id=%s phone=%s", user.id, user.phone)
     await state.clear()
     await message.answer("Вход выполнен.", reply_markup=main_menu_keyboard())
 

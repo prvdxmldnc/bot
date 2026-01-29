@@ -11,7 +11,7 @@ from app.database import init_db
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     await init_db()
     redis = Redis.from_url(settings.redis_url)
     storage = RedisStorage(redis)

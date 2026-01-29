@@ -119,6 +119,16 @@ async def admin_threads(request: Request, session: SessionDep) -> HTMLResponse:
     )
 
 
+@router.get("/debug/users")
+async def debug_users(session: SessionDep) -> dict[str, object]:
+    users = await session.execute(select(User).order_by(User.created_at.desc()))
+    user_list = [
+        {"id": user.id, "phone": user.phone, "fio": user.fio, "created_at": user.created_at.isoformat()}
+        for user in users.scalars().all()
+    ]
+    return {"count": len(user_list), "users": user_list}
+
+
 @router.get("/search", response_class=HTMLResponse)
 async def admin_search(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("search.html", {"request": request})
