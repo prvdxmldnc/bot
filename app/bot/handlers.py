@@ -149,6 +149,9 @@ async def registration_email(message: Message, state: FSMContext) -> None:
 async def registration_password(message: Message, state: FSMContext) -> None:
     if await _handle_auth_interrupts(message, state):
         return
+    if len(message.text or "") < 5:
+        await message.answer("Пароль слишком короткий. Минимум 5 символов:")
+        return
     data = await state.get_data()
     org_name = data["org_name"]
     async with get_session_context() as session:
