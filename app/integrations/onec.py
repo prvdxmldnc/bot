@@ -102,7 +102,7 @@ def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
             skipped += 1
             continue
         title = title[:255]
-        category = _coerce_str(item.get("category"))[:255]
+        category = _coerce_str(item.get("category"))[:64]
         description = _coerce_str(item.get("description"))
         price = _coerce_float(item.get("price"))
         qty_value = item.get("stock_qty")
