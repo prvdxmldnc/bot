@@ -143,9 +143,12 @@ async def one_c_catalog(
     items, skipped, sku_adjusted = _normalize_items(raw_items)
     try:
         updated = await upsert_catalog(session, items)
-    except Exception:
+    except Exception as exc:
         logger.exception("1C webhook upsert failed")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Upsert failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Upsert failed: {exc.__class__.__name__}",
+        )
     logger.info(
         "1C webhook processed",
         extra={
