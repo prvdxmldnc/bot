@@ -1,19 +1,19 @@
 import logging
-from typing import Any
-
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.routes import router as admin_router
 from app.config import settings
 from app.database import get_session, init_db
+from app.integrations.onec import router as one_c_router
 from app.models import Category, Organization, Order, Product, User
-from app.services.one_c import normalize_one_c_items, schedule_one_c_sync, upsert_catalog
+from app.services.one_c import schedule_one_c_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 app = FastAPI(title="Partner-M API")
 app.include_router(admin_router)
+app.include_router(one_c_router)
 
 
 @app.on_event("startup")
@@ -27,31 +27,6 @@ async def startup() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.post("/integrations/1c/catalog")
-@app.post("/onec/catalog")
-@app.post("/api/onec/catalog")
-async def one_c_catalog(
-    payload: Any = Body(...),
-    session: AsyncSession = Depends(get_session),
-    token: str | None = Header(default=None, alias="X-1C-Token"),
-    x_token: str | None = Header(default=None, alias="X-Token"),
-    authorization: str | None = Header(default=None, alias="Authorization"),
-    token_query: str | None = Query(default=None, alias="token"),
-) -> dict[str, int]:
-    provided_token = token or x_token or token_query
-    if not provided_token and authorization:
-        parts = authorization.split()
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            provided_token = parts[1]
-    if settings.one_c_webhook_token and provided_token != settings.one_c_webhook_token:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
-    items = normalize_one_c_items(payload)
-    if not items:
-        return {"updated": 0}
-    updated = await upsert_catalog(session, items)
-    return {"updated": updated}
 
 
 @app.get("/admin/summary")
