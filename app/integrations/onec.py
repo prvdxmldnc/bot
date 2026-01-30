@@ -1,10 +1,15 @@
 from typing import Any
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query, status
+import logging
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import get_session
+from app.services.one_c import upsert_catalog
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _extract_token(
@@ -37,50 +42,71 @@ def _extract_items(payload: Any) -> list[dict[str, Any]]:
     raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid payload")
 
 
-def _validate_items(items: list[dict[str, Any]]) -> None:
-    required_fields = ("sku", "title", "category", "price", "stock_qty", "description")
-    for index, item in enumerate(items):
+def _coerce_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _coerce_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        normalized = value.replace(" ", "").replace(",", ".")
+        try:
+            return float(normalized)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _generate_sku(title: str) -> str:
+    slug = "".join(char if char.isalnum() else "-" for char in title.lower())
+    slug = "-".join(filter(None, slug.split("-")))
+    return slug[:64]
+
+
+def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    normalized: list[dict[str, Any]] = []
+    skipped = 0
+    for item in items:
         if not isinstance(item, dict):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Item at index {index} must be an object",
-            )
-        for field in required_fields:
-            if field not in item:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Missing field '{field}' at index {index}",
-                )
-        if not isinstance(item["sku"], str):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Field 'sku' must be string at index {index}",
-            )
-        if not isinstance(item["title"], str):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Field 'title' must be string at index {index}",
-            )
-        if not isinstance(item["category"], str):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Field 'category' must be string at index {index}",
-            )
-        if not isinstance(item["description"], str):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Field 'description' must be string at index {index}",
-            )
-        if not isinstance(item["price"], (int, float)):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Field 'price' must be number at index {index}",
-            )
-        if not isinstance(item["stock_qty"], (int, float)):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Field 'stock_qty' must be number at index {index}",
-            )
+            skipped += 1
+            continue
+        title = _coerce_str(item.get("title") or item.get("name"))
+        if not title:
+            skipped += 1
+            continue
+        sku = _coerce_str(item.get("sku"))
+        if not sku:
+            sku = _generate_sku(title)
+        if not sku:
+            skipped += 1
+            continue
+        category = _coerce_str(item.get("category"))
+        description = _coerce_str(item.get("description"))
+        price = _coerce_float(item.get("price"))
+        qty_value = item.get("stock_qty")
+        if qty_value is None:
+            qty_value = item.get("qty")
+        if qty_value is None:
+            qty_value = item.get("quantity")
+        stock_qty = _coerce_float(qty_value)
+        normalized.append(
+            {
+                "sku": sku,
+                "title": title,
+                "category": category,
+                "price": price,
+                "stock_qty": stock_qty,
+                "description": description,
+            }
+        )
+    return normalized, skipped
 
 
 @router.post("/integrations/1c/catalog")
@@ -88,6 +114,7 @@ def _validate_items(items: list[dict[str, Any]]) -> None:
 @router.post("/api/onec/catalog")
 async def one_c_catalog(
     payload: Any = Body(...),
+    session: AsyncSession = Depends(get_session),
     authorization: str | None = Header(default=None, alias="Authorization"),
     token_header: str | None = Header(default=None, alias="X-1C-Token"),
     x_token_header: str | None = Header(default=None, alias="X-Token"),
@@ -97,6 +124,15 @@ async def one_c_catalog(
         provided_token = _extract_token(authorization, token_header, x_token_header, token_query)
         if provided_token != settings.one_c_webhook_token:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    items = _extract_items(payload)
-    _validate_items(items)
-    return {"ok": True, "received": len(items)}
+    raw_items = _extract_items(payload)
+    items, skipped = _normalize_items(raw_items)
+    try:
+        updated = await upsert_catalog(session, items)
+    except Exception:
+        logger.exception("1C webhook upsert failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Upsert failed")
+    logger.info(
+        "1C webhook processed",
+        extra={"received": len(raw_items), "upserted": updated, "skipped": skipped},
+    )
+    return {"ok": True, "received": len(raw_items), "upserted": updated, "skipped": skipped}

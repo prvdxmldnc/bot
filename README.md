@@ -78,6 +78,12 @@ POST /api/onec/catalog
 - `X-1C-Token: <token>`
 - `X-Token: <token>`
 - query-параметр `?token=<token>`
+HTTP push сразу пишет в БД через `upsert_catalog`, а ответ возвращает:
+
+```json
+{"ok": true, "received": 1, "upserted": 1, "skipped": 0}
+```
+
 Ожидается JSON с массивом номенклатуры:
 
 ```json
