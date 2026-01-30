@@ -134,6 +134,14 @@ async def admin_search(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("search.html", {"request": request})
 
 
+@router.post("/sync/1c")
+async def sync_one_c(session: SessionDep) -> RedirectResponse:
+    from app.services.one_c import run_one_c_sync
+
+    await run_one_c_sync(session)
+    return RedirectResponse(url="/admin/catalog", status_code=303)
+
+
 @router.post("/search", response_class=HTMLResponse)
 async def admin_search_post(
     request: Request,

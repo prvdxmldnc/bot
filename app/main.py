@@ -5,8 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.routes import router as admin_router
+from app.config import settings
 from app.database import get_session, init_db
 from app.models import Category, Organization, Order, Product, User
+from app.services.one_c import schedule_one_c_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 app = FastAPI(title="Partner-M API")
@@ -16,6 +18,9 @@ app.include_router(admin_router)
 @app.on_event("startup")
 async def startup() -> None:
     await init_db()
+    if settings.one_c_enabled:
+        import asyncio
+        asyncio.create_task(schedule_one_c_sync(get_session))
 
 
 @app.get("/health")
