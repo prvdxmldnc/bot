@@ -1,5 +1,6 @@
 from typing import Any
 
+import hashlib
 import logging
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,15 +65,26 @@ def _coerce_float(value: Any) -> float:
     return 0.0
 
 
-def _generate_sku(title: str) -> str:
-    slug = "".join(char if char.isalnum() else "-" for char in title.lower())
-    slug = "-".join(filter(None, slug.split("-")))
-    return slug[:64]
+def _hash_sku(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()
 
 
-def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _normalize_sku(value: str, fallback: str) -> tuple[str, bool]:
+    source = value or fallback
+    if not source:
+        return "", False
+    normalized = _coerce_str(source)
+    if not normalized:
+        return "", False
+    if len(normalized) <= 64:
+        return normalized, normalized != value
+    return _hash_sku(normalized), True
+
+
+def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
     normalized: list[dict[str, Any]] = []
     skipped = 0
+    sku_adjusted = 0
     for item in items:
         if not isinstance(item, dict):
             skipped += 1
@@ -81,13 +93,16 @@ def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
         if not title:
             skipped += 1
             continue
-        sku = _coerce_str(item.get("sku"))
-        if not sku:
-            sku = _generate_sku(title)
+        raw_sku = _coerce_str(item.get("sku"))
+        fallback = _coerce_str(item.get("id")) or title
+        sku, adjusted = _normalize_sku(raw_sku, fallback)
+        if adjusted:
+            sku_adjusted += 1
         if not sku:
             skipped += 1
             continue
-        category = _coerce_str(item.get("category"))
+        title = title[:255]
+        category = _coerce_str(item.get("category"))[:255]
         description = _coerce_str(item.get("description"))
         price = _coerce_float(item.get("price"))
         qty_value = item.get("stock_qty")
@@ -106,7 +121,7 @@ def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
                 "description": description,
             }
         )
-    return normalized, skipped
+    return normalized, skipped, sku_adjusted
 
 
 @router.post("/integrations/1c/catalog")
@@ -125,7 +140,7 @@ async def one_c_catalog(
         if provided_token != settings.one_c_webhook_token:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     raw_items = _extract_items(payload)
-    items, skipped = _normalize_items(raw_items)
+    items, skipped, sku_adjusted = _normalize_items(raw_items)
     try:
         updated = await upsert_catalog(session, items)
     except Exception:
@@ -133,6 +148,11 @@ async def one_c_catalog(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Upsert failed")
     logger.info(
         "1C webhook processed",
-        extra={"received": len(raw_items), "upserted": updated, "skipped": skipped},
+        extra={
+            "received": len(raw_items),
+            "upserted": updated,
+            "skipped": skipped,
+            "sku_adjusted": sku_adjusted,
+        },
     )
     return {"ok": True, "received": len(raw_items), "upserted": updated, "skipped": skipped}
