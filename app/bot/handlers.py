@@ -3,7 +3,7 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -12,6 +12,8 @@ from app.bot.keyboards import (
     catalog_keyboard,
     auth_keyboard,
     main_menu_keyboard,
+    order_actions_keyboard,
+    product_actions_keyboard,
     products_keyboard,
     registration_done_keyboard,
     start_keyboard,
@@ -19,10 +21,12 @@ from app.bot.keyboards import (
 from app.bot.states import LoginStates, RegistrationStates
 from app.config import settings
 from app.crud import (
-    create_order,
     create_organization,
     create_thread,
-    find_product_by_text,
+    create_search_log,
+    find_products_by_text,
+    get_or_create_draft_order,
+    add_item_to_order,
     get_user_by_phone,
     get_user_by_tg_id,
     list_orders_for_user,
@@ -31,7 +35,8 @@ from app.crud import (
     list_subcategories,
 )
 from app.database import get_session_context
-from app.models import OrgMember, Product, Thread, User
+from app.models import Message as ThreadMessage
+from app.models import OrgMember, Order, Product, Thread, User
 from app.utils.security import hash_password, verify_password
 
 router = Router()
@@ -250,14 +255,34 @@ async def show_catalog(message: Message) -> None:
     if not categories:
         await message.answer("Каталог пуст. Обратитесь к менеджеру.")
         return
+    await _send_category_page(message, categories, page=0)
+
+
+async def _send_category_page(message: Message, categories: list, page: int) -> None:
+    per_page = 8
+    total_pages = max(1, (len(categories) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    chunk = categories[start : start + per_page]
     await message.answer(
         "Выберите категорию:",
-        reply_markup=catalog_keyboard([(cat.id, cat.title_ru) for cat in categories]),
+        reply_markup=catalog_keyboard([(cat.id, cat.title_ru) for cat in chunk], page, total_pages, prefix="cat"),
+    )
+
+
+@router.callback_query(F.data.startswith("catpage:"))
+async def category_page(callback: CallbackQuery) -> None:
+    page = int(callback.data.split(":")[1])
+    async with get_session_context() as session:
+        categories = await list_root_categories(session)
+    await callback.message.edit_text(
+        "Выберите категорию:",
+        reply_markup=catalog_keyboard([(cat.id, cat.title_ru) for cat in categories[page * 8 : page * 8 + 8]], page, max(1, (len(categories) + 7) // 8), prefix="cat"),
     )
 
 
 @router.callback_query(F.data.startswith("cat:"))
-async def category_click(callback) -> None:
+async def category_click(callback: CallbackQuery) -> None:
     cat_id = int(callback.data.split(":")[1])
     async with get_session_context() as session:
         subcats = await list_subcategories(session, cat_id)
@@ -265,20 +290,61 @@ async def category_click(callback) -> None:
     if subcats:
         await callback.message.edit_text(
             "Выберите подкатегорию:",
-            reply_markup=catalog_keyboard([(cat.id, cat.title_ru) for cat in subcats]),
+            reply_markup=catalog_keyboard([(cat.id, cat.title_ru) for cat in subcats], 0, 1, prefix="cat"),
         )
         return
     if products:
-        await callback.message.edit_text(
-            "Товары:",
-            reply_markup=products_keyboard([(prod.id, prod.title_ru) for prod in products]),
-        )
+        await _send_product_page(callback.message, products, page=0, category_id=cat_id)
         return
     await callback.message.edit_text("В этой категории пока нет товаров.")
 
+async def _send_product_page(message: Message, products: list[Product], page: int, category_id: int) -> None:
+    per_page = 8
+    total_pages = max(1, (len(products) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    chunk = products[start : start + per_page]
+    await message.edit_text(
+        "Товары:",
+        reply_markup=products_keyboard(
+            [(prod.id, prod.title_ru) for prod in chunk], page, total_pages, prefix="prod", context=str(category_id)
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("prodpage:"))
+async def product_page(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    page = int(parts[1])
+    category_id = int(parts[2]) if len(parts) > 2 else 0
+    async with get_session_context() as session:
+        products = await list_products_by_category(session, category_id) if category_id else []
+    if not products:
+        await callback.message.edit_text("Товары не найдены.")
+        return
+    await _send_product_page(callback.message, products, page, category_id)
+
+
+@router.callback_query(F.data.startswith("sprodpage:"))
+async def search_product_page(callback: CallbackQuery) -> None:
+    page = int(callback.data.split(":")[1])
+    async with get_session_context() as session:
+        result = await session.execute(select(Product).order_by(Product.title_ru))
+        products = result.scalars().all()
+    await callback.message.edit_text(
+        "Результаты поиска:",
+        reply_markup=products_keyboard(
+            [(prod.id, prod.title_ru) for prod in products[page * 8 : page * 8 + 8]],
+            page,
+            max(1, (len(products) + 7) // 8),
+            prefix="sprod",
+        ),
+    )
+
 
 @router.callback_query(F.data.startswith("prod:"))
-async def product_click(callback) -> None:
+@router.callback_query(F.data.startswith("sprod:"))
+async def product_click(callback: CallbackQuery) -> None:
     prod_id = int(callback.data.split(":")[1])
     async with get_session_context() as session:
         result = await session.execute(select(Product).where(Product.id == prod_id))
@@ -287,9 +353,91 @@ async def product_click(callback) -> None:
         await callback.message.edit_text("Товар не найден.")
         return
     await callback.message.edit_text(
-        f"{product.title_ru}\nЦена: {product.price}\nВ наличии: {product.stock_qty}\\n"
-        "Чтобы заказать, отправьте название товара в чат.",
+        f"{product.title_ru}\nЦена: {product.price}\nВ наличии: {product.stock_qty}\nSKU: {product.sku or '-'}",
+        reply_markup=product_actions_keyboard(product.id),
     )
+
+
+@router.callback_query(F.data.startswith("add:"))
+async def add_to_order(callback: CallbackQuery) -> None:
+    prod_id = int(callback.data.split(":")[1])
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, callback.from_user.id)
+        if not user:
+            await callback.message.edit_text("Сначала выполните вход.")
+            return
+        result = await session.execute(select(Product).where(Product.id == prod_id))
+        product = result.scalar_one_or_none()
+        if not product:
+            await callback.message.edit_text("Товар не найден.")
+            return
+        order = await get_or_create_draft_order(session, user)
+        await add_item_to_order(session, order, product, qty=1)
+        await session.commit()
+    await callback.message.edit_text("Товар добавлен в черновик заказа.", reply_markup=main_menu_keyboard())
+
+
+@router.callback_query(F.data == "back:catalog")
+async def back_to_catalog(callback: CallbackQuery) -> None:
+    async with get_session_context() as session:
+        categories = await list_root_categories(session)
+    if not categories:
+        await callback.message.edit_text("Каталог пуст. Обратитесь к менеджеру.")
+        return
+    await callback.message.edit_text(
+        "Выберите категорию:",
+        reply_markup=catalog_keyboard([(cat.id, cat.title_ru) for cat in categories[:8]], 0, max(1, (len(categories) + 7) // 8), prefix="cat"),
+    )
+
+
+@router.callback_query(F.data.startswith("order:submit:"))
+async def submit_order(callback: CallbackQuery) -> None:
+    order_id = int(callback.data.split(":")[2])
+    async with get_session_context() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if not order:
+            await callback.message.edit_text("Заказ не найден.")
+            return
+        order.status = "pending"
+        await session.commit()
+    await callback.message.edit_text("Заказ оформлен. Менеджер свяжется с вами.")
+
+
+@router.callback_query(F.data.startswith("order:cancel:"))
+async def cancel_order(callback: CallbackQuery) -> None:
+    order_id = int(callback.data.split(":")[2])
+    async with get_session_context() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if not order:
+            await callback.message.edit_text("Заказ не найден.")
+            return
+        order.status = "cancelled"
+        await session.commit()
+    await callback.message.edit_text("Заказ отменён.")
+
+
+@router.callback_query(F.data.startswith("order:question:"))
+async def order_question(callback: CallbackQuery) -> None:
+    order_id = int(callback.data.split(":")[2])
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, callback.from_user.id)
+        if not user:
+            await callback.message.edit_text("Сначала выполните вход.")
+            return
+        title = f"Заказ #{order_id}"
+        thread = await create_thread(session, user.org_memberships[0].org_id if user.org_memberships else None, title)
+        session.add(
+            ThreadMessage(
+                thread_id=thread.id,
+                author_user_id=user.id,
+                author_name_snapshot=user.fio,
+                text=f"Вопрос по заказу #{order_id}",
+            )
+        )
+        await session.commit()
+    await callback.message.edit_text("Вопрос создан. Менеджер ответит в ближайшее время.")
 
 
 @router.message(F.text == "Заказы")
@@ -303,8 +451,12 @@ async def list_orders(message: Message) -> None:
     if not orders:
         await message.answer("Заказов пока нет.")
         return
-    lines = [f"#{order.id} — {order.status} от {order.created_at:%d.%m}" for order in orders]
-    await message.answer("Ваши заказы:\n" + "\n".join(lines))
+    for order in orders:
+        items = ", ".join([f"{item.product.title_ru} x{item.qty}" for item in order.items]) if order.items else "без позиций"
+        await message.answer(
+            f"#{order.id} — {order.status}\n{items}",
+            reply_markup=order_actions_keyboard(order.id, order.status),
+        )
 
 
 @router.message(F.text == "Мои вопросы")
@@ -357,11 +509,29 @@ async def handle_text_order(message: Message) -> None:
             return
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
-        product = await find_product_by_text(session, message.text)
-        if not product:
+        await create_search_log(session, user.id, message.text)
+        products = await find_products_by_text(session, message.text, limit=5)
+        if not products:
+            await session.commit()
             await message.answer("Не удалось найти товар. Менеджер свяжется с вами.")
+            await _notify_manager(message, user)
             return
-        order = await create_order(session, user, product)
+        keyboard = products_keyboard([(prod.id, prod.title_ru) for prod in products], 0, 1, prefix="sprod")
+        await message.answer("Нашли варианты. Выберите товар:", reply_markup=keyboard)
+        await session.commit()
+        await _notify_manager(message, user)
+        return
+    await message.answer("Не удалось обработать запрос.")
+
+
+async def _notify_manager(message: Message, user: User) -> None:
+    async with get_session_context() as session:
+        manager = await get_user_by_phone(session, settings.manager_phone)
+    if manager and manager.tg_id:
+        await message.bot.send_message(
+            manager.tg_id,
+            f"Новое сообщение от {user.fio} ({user.phone}): {message.text}",
+        )
         await session.commit()
         await message.answer(
             f"Создан заказ #{order.id} на {product.title_ru}. Менеджер свяжется с вами.",

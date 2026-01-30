@@ -1,7 +1,8 @@
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.models import Category, Order, OrderItem, Organization, Product, Thread, User
+from app.models import Category, Order, OrderItem, Organization, Product, SearchLog, Thread, User
 
 
 async def get_user_by_phone(session: AsyncSession, phone: str) -> User | None:
@@ -36,24 +37,58 @@ async def list_products_by_category(session: AsyncSession, category_id: int) -> 
     return list(result.scalars().all())
 
 
-async def find_product_by_text(session: AsyncSession, text: str) -> Product | None:
-    result = await session.execute(select(Product).where(Product.title_ru.ilike(f"%{text}%")))
-    return result.scalars().first()
+async def find_products_by_text(session: AsyncSession, text: str, limit: int = 10) -> list[Product]:
+    query = select(Product).where(Product.title_ru.ilike(f"%{text}%"))
+    if any(char.isdigit() for char in text):
+        query = select(Product).where(
+            or_(Product.sku.ilike(f"%{text}%"), Product.title_ru.ilike(f"%{text}%"))
+        )
+    result = await session.execute(query.limit(limit))
+    return list(result.scalars().all())
 
 
-async def create_order(session: AsyncSession, user: User, product: Product, qty: int = 1) -> Order:
-    org_id = user.org_memberships[0].org_id if user.org_memberships else None
-    order = Order(org_id=org_id, created_by_user_id=user.id)
-    session.add(order)
+async def create_search_log(session: AsyncSession, user_id: int | None, text: str) -> None:
+    session.add(SearchLog(user_id=user_id, raw_text=text))
     await session.flush()
-    item = OrderItem(order_id=order.id, product_id=product.id, qty=qty, price_at_time=product.price)
-    session.add(item)
+
+
+async def get_or_create_draft_order(session: AsyncSession, user: User) -> Order:
+    result = await session.execute(
+        select(Order)
+        .where(Order.created_by_user_id == user.id, Order.status == "draft")
+        .options(selectinload(Order.items))
+    )
+    order = result.scalar_one_or_none()
+    if order:
+        return order
+    org_id = user.org_memberships[0].org_id if user.org_memberships else None
+    order = Order(org_id=org_id, created_by_user_id=user.id, status="draft")
+    session.add(order)
     await session.flush()
     return order
 
 
+async def add_item_to_order(session: AsyncSession, order: Order, product: Product, qty: int = 1) -> None:
+    result = await session.execute(
+        select(OrderItem).where(OrderItem.order_id == order.id, OrderItem.product_id == product.id)
+    )
+    item = result.scalar_one_or_none()
+    if item:
+        item.qty += qty
+        item.price_at_time = product.price
+    else:
+        item = OrderItem(order_id=order.id, product_id=product.id, qty=qty, price_at_time=product.price)
+        session.add(item)
+    await session.flush()
+
+
 async def list_orders_for_user(session: AsyncSession, user: User) -> list[Order]:
-    result = await session.execute(select(Order).where(Order.created_by_user_id == user.id).order_by(Order.created_at.desc()))
+    result = await session.execute(
+        select(Order)
+        .where(Order.created_by_user_id == user.id)
+        .options(selectinload(Order.items).selectinload(OrderItem.product))
+        .order_by(Order.created_at.desc())
+    )
     return list(result.scalars().all())
 
 
