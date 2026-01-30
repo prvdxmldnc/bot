@@ -99,7 +99,7 @@ async def parse_order(text: str) -> dict[str, Any]:
         "temperature": 0.1,
     }
     timeout = settings.gigachat_timeout_seconds or 20
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=settings.gigachat_verify_ssl) as client:
         response = await client.post(
             f"{settings.gigachat_base_url}/chat/completions",
             json=payload,
@@ -139,7 +139,7 @@ async def rerank_candidates(item: dict[str, Any], candidates: list[dict[str, Any
         "temperature": 0.1,
     }
     timeout = settings.gigachat_timeout_seconds or 20
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=settings.gigachat_verify_ssl) as client:
         response = await client.post(
             f"{settings.gigachat_base_url}/chat/completions",
             json=payload,

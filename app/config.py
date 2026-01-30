@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     gigachat_model: str = "GigaChat"
     gigachat_base_url: str = "https://gigachat.devices.sberbank.ru/api/v1"
     gigachat_timeout_seconds: int = 20
+    gigachat_verify_ssl: bool = True
     one_c_enabled: bool = False
     one_c_base_url: str = ""
     one_c_username: str = ""
