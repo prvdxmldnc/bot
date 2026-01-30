@@ -189,3 +189,4 @@ async def schedule_one_c_sync(get_session) -> None:
         except Exception:
             logger.exception("1C sync failed")
         await asyncio.sleep(settings.one_c_sync_interval_minutes * 60)
+
