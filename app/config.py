@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     one_c_username: str = ""
     one_c_password: str = ""
     one_c_sync_interval_minutes: int = 10
+    one_c_webhook_token: str = ""
 
     class Config:
         env_file = ".env"

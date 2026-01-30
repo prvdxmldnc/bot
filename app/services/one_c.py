@@ -14,6 +14,21 @@ from app.models import Category, Product
 logger = logging.getLogger(__name__)
 
 
+def normalize_one_c_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("items"), list):
+            items = payload["items"]
+        elif isinstance(payload.get("catalog"), list):
+            items = payload["catalog"]
+        else:
+            items = [payload]
+    else:
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
 async def fetch_one_c_catalog() -> list[dict[str, Any]]:
     if not settings.one_c_base_url:
         return []
