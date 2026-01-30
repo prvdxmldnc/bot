@@ -58,7 +58,7 @@ LLM ожидает JSON-массив объектов с полями `title` и
 ## Синхронизация с 1С (10 УТ)
 
 Бот умеет забирать справочник номенклатуры и обновлять каталог каждые 10 минут.
-Ожидается JSON от 1С по адресу `${ONE_C_BASE_URL}/catalog`:
+Ожидается JSON от 1С по адресу `${ONE_C_BASE_URL}/catalog` (без использования OData):
 
 ```json
 {
@@ -79,7 +79,7 @@ LLM ожидает JSON-массив объектов с полями `title` и
 
 ```
 ONE_C_ENABLED=true
-ONE_C_BASE_URL=https://ваш-1с-сервер/odata
+ONE_C_BASE_URL=https://ваш-1с-сервер
 ONE_C_USERNAME=логин
 ONE_C_PASSWORD=пароль
 ONE_C_SYNC_INTERVAL_MINUTES=10
