@@ -28,12 +28,15 @@ def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n]
 
 
-def _normalize_sku(raw: Any) -> Optional[str]:
+def _normalize_sku(raw: Any, fallback: Any = None) -> Optional[str]:
     s = _to_str(raw)
+    if not s:
+        s = _to_str(fallback)
     if not s:
         return None
     if len(s) <= SKU_MAX_LEN:
         return s
+    # stable short id (40 chars)
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
@@ -110,7 +113,8 @@ async def upsert_catalog(session: AsyncSession, items: list[dict[str, Any]]) -> 
         if not title_ru:
             continue
 
-        sku = _normalize_sku(item.get("sku"))
+        # Protect DB constraints even if caller didn't normalize
+        sku = _normalize_sku(item.get("sku"), fallback=item.get("id") or title_ru)
         category_title = _truncate(_to_str(item.get("category")), CATEGORY_MAX_LEN)
 
         description = _to_str(item.get("description")) or ""
@@ -121,6 +125,7 @@ async def upsert_catalog(session: AsyncSession, items: list[dict[str, Any]]) -> 
 
         category_id = None
         if category_title:
+            # avoid premature autoflush during category lookup
             async with session.no_autoflush:
                 result = await session.execute(select(Category).where(Category.title_ru == category_title))
                 category = result.scalar_one_or_none()
@@ -129,9 +134,9 @@ async def upsert_catalog(session: AsyncSession, items: list[dict[str, Any]]) -> 
                 category = Category(title_ru=category_title)
                 session.add(category)
                 await session.flush()
-
             category_id = category.id
 
+        # lookup
         if sku:
             query = select(Product).where(Product.sku == sku)
         else:
