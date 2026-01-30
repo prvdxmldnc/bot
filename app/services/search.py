@@ -4,11 +4,68 @@ import json
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Product
+
+
+def _extract_numbers(text: str) -> list[int]:
+    numbers = []
+    current = ""
+    for ch in text:
+        if ch.isdigit():
+            current += ch
+        elif current:
+            numbers.append(int(current))
+            current = ""
+    if current:
+        numbers.append(int(current))
+    return numbers
+
+
+def _score_product(product: Product, query: str, numbers: list[int]) -> float:
+    score = 0.0
+    q = query.lower()
+    title = (product.title_ru or "").lower()
+    sku = (product.sku or "").lower()
+    if sku and q in sku:
+        score += 3.0
+    if q in title:
+        score += 1.5
+    if numbers:
+        hits = sum(1 for n in numbers if str(n) in title)
+        score += hits * 0.5
+    return score
+
+
+async def search_products(session: AsyncSession, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    q = query.strip()
+    numbers = _extract_numbers(q)
+    base = select(Product)
+    if any(char.isdigit() for char in q):
+        base = base.where(or_(Product.sku.ilike(f"%{q}%"), Product.title_ru.ilike(f"%{q}%")))
+    else:
+        base = base.where(Product.title_ru.ilike(f"%{q}%"))
+    result = await session.execute(base.limit(50))
+    products = list(result.scalars().all())
+    scored = [
+        {"product": product, "score": _score_product(product, q, numbers)}
+        for product in products
+    ]
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return [
+        {
+            "id": item["product"].id,
+            "sku": item["product"].sku,
+            "title_ru": item["product"].title_ru,
+            "price": float(item["product"].price or 0),
+            "stock_qty": item["product"].stock_qty,
+            "score": item["score"],
+        }
+        for item in scored[:limit]
+    ]
 
 
 def _parse_llm_content(content: str, source: str) -> list[dict[str, Any]]:

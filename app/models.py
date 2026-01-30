@@ -153,4 +153,7 @@ class SearchLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     raw_text: Mapped[str] = mapped_column(Text)
+    parsed_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

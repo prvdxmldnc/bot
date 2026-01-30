@@ -47,8 +47,23 @@ async def find_products_by_text(session: AsyncSession, text: str, limit: int = 1
     return list(result.scalars().all())
 
 
-async def create_search_log(session: AsyncSession, user_id: int | None, text: str) -> None:
-    session.add(SearchLog(user_id=user_id, raw_text=text))
+async def create_search_log(
+    session: AsyncSession,
+    user_id: int | None,
+    text: str,
+    parsed_json: str | None = None,
+    selected_json: str | None = None,
+    confidence: float | None = None,
+) -> None:
+    session.add(
+        SearchLog(
+            user_id=user_id,
+            raw_text=text,
+            parsed_json=parsed_json,
+            selected_json=selected_json,
+            confidence=confidence,
+        )
+    )
     await session.flush()
 
 

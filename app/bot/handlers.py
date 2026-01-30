@@ -1,3 +1,4 @@
+import json
 import logging
 
 from aiogram import F, Router
@@ -24,7 +25,6 @@ from app.crud import (
     create_organization,
     create_thread,
     create_search_log,
-    find_products_by_text,
     get_or_create_draft_order,
     add_item_to_order,
     get_user_by_phone,
@@ -37,6 +37,8 @@ from app.crud import (
 from app.database import get_session_context
 from app.models import Message as ThreadMessage
 from app.models import OrgMember, Order, Product, Thread, User
+from app.services.llm_gigachat import parse_order, rerank_candidates
+from app.services.search import search_products
 from app.utils.security import hash_password, verify_password
 
 router = Router()
@@ -509,16 +511,59 @@ async def handle_text_order(message: Message) -> None:
             return
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
-        await create_search_log(session, user.id, message.text)
-        products = await find_products_by_text(session, message.text, limit=5)
-        if not products:
+        parsed = await parse_order(message.text)
+        items = parsed.get("items") or []
+        selected = []
+        low_confidence = False
+        order = await get_or_create_draft_order(session, user)
+        for item in items:
+            candidates = await search_products(session, item.get("query") or item.get("raw") or "", limit=10)
+            rerank = await rerank_candidates(item, candidates)
+            best_id = rerank.get("best_id")
+            confidence = float(rerank.get("confidence") or 0)
+            selected.append(
+                {"item": item, "best_id": best_id, "confidence": confidence, "candidates": candidates[:5]}
+            )
+            if not best_id or confidence < 0.78:
+                low_confidence = True
+                continue
+            result = await session.execute(select(Product).where(Product.id == best_id))
+            product = result.scalar_one_or_none()
+            if product:
+                await add_item_to_order(session, order, product, qty=int(item.get("qty") or 1))
+        await create_search_log(
+            session,
+            user.id,
+            message.text,
+            parsed_json=json.dumps(parsed, ensure_ascii=False),
+            selected_json=json.dumps(selected, ensure_ascii=False),
+            confidence=max((s["confidence"] for s in selected), default=0.0),
+        )
+        await session.commit()
+        if low_confidence:
+            thread = await create_thread(
+                session,
+                user.org_memberships[0].org_id if user.org_memberships else None,
+                "Автоподбор: требуется уточнение",
+            )
+            session.add(
+                ThreadMessage(
+                    thread_id=thread.id,
+                    author_user_id=user.id,
+                    author_name_snapshot=user.fio,
+                    text=f"Запрос: {message.text}\nParsed: {json.dumps(parsed, ensure_ascii=False)}",
+                )
+            )
             await session.commit()
-            await message.answer("Не удалось найти товар. Менеджер свяжется с вами.")
+            await message.answer(
+                "Не удалось однозначно подобрать товары — передали менеджеру. Он свяжется с вами."
+            )
             await _notify_manager(message, user)
             return
-        keyboard = products_keyboard([(prod.id, prod.title_ru) for prod in products], 0, 1, prefix="sprod")
-        await message.answer("Нашли варианты. Выберите товар:", reply_markup=keyboard)
-        await session.commit()
+        await message.answer(
+            "Автоподбор выполнен. Проверьте черновик заказа и нажмите «Оформить».",
+            reply_markup=main_menu_keyboard(),
+        )
         await _notify_manager(message, user)
         return
     await message.answer("Не удалось обработать запрос.")
@@ -531,11 +576,6 @@ async def _notify_manager(message: Message, user: User) -> None:
         await message.bot.send_message(
             manager.tg_id,
             f"Новое сообщение от {user.fio} ({user.phone}): {message.text}",
-        )
-        await session.commit()
-        await message.answer(
-            f"Создан заказ #{order.id} на {product.title_ru}. Менеджер свяжется с вами.",
-            reply_markup=main_menu_keyboard(),
         )
 
 
