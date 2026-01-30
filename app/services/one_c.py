@@ -126,7 +126,7 @@ async def upsert_catalog(session: AsyncSession, items: list[dict[str, Any]]) -> 
         category_id = None
         if category_title:
             # avoid premature autoflush during category lookup
-            async with session.no_autoflush:
+            with session.no_autoflush:
                 result = await session.execute(select(Category).where(Category.title_ru == category_title))
                 category = result.scalar_one_or_none()
 
