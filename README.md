@@ -64,13 +64,20 @@ LLM ожидает JSON-массив объектов с полями `title` и
 
 ### HTTP push: 1С → бот
 
-Бот принимает JSON по адресу:
+Бот принимает JSON по адресу (любой из вариантов):
 
 ```
 POST /integrations/1c/catalog
+POST /onec/catalog
+POST /api/onec/catalog
 ```
 
-Если задан `ONE_C_WEBHOOK_TOKEN`, передавайте заголовок `X-1C-Token`.
+Если задан `ONE_C_WEBHOOK_TOKEN`, передавайте токен одним из способов:
+
+- `Authorization: Bearer <token>`
+- `X-1C-Token: <token>`
+- `X-Token: <token>`
+- query-параметр `?token=<token>`
 Ожидается JSON с массивом номенклатуры:
 
 ```json
@@ -95,15 +102,15 @@ POST /integrations/1c/catalog
 ```bash
 curl -X POST http://localhost:8000/integrations/1c/catalog \\
   -H "Content-Type: application/json" \\
-  -H "X-1C-Token: ваш_токен" \\
+  -H "Authorization: Bearer ваш_токен" \\
   -d '{"items":[{"sku":"ABC-001","title":"Труба ПВХ 20мм","category":"Трубы","stock_qty":12,"price":150.5,"description":"Описание"}]}'
 ```
 
 Минимальная схема модуля обмена в 1С:
 
 1. Сформируйте массив номенклатуры (`items`) с полями `sku`, `title`, `category`, `stock_qty`, `price`, `description`.
-2. Отправьте HTTP POST на адрес бота `http://<host>:8000/integrations/1c/catalog`.
-3. Если настроен `ONE_C_WEBHOOK_TOKEN`, добавьте заголовок `X-1C-Token`.
+2. Отправьте HTTP POST на адрес бота `http://<host>:8000/integrations/1c/catalog` (или `/onec/catalog`).
+3. Если настроен `ONE_C_WEBHOOK_TOKEN`, добавьте токен любым из способов: `Authorization: Bearer`, `X-1C-Token`, `X-Token` или `?token=`.
 4. Для регулярной отправки заведите регламентное задание в 1С (например, каждые 10 минут).
 
 Настройки в `.env` для push:

@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,12 +30,22 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/integrations/1c/catalog")
+@app.post("/onec/catalog")
+@app.post("/api/onec/catalog")
 async def one_c_catalog(
     payload: Any = Body(...),
     session: AsyncSession = Depends(get_session),
     token: str | None = Header(default=None, alias="X-1C-Token"),
+    x_token: str | None = Header(default=None, alias="X-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    token_query: str | None = Query(default=None, alias="token"),
 ) -> dict[str, int]:
-    if settings.one_c_webhook_token and token != settings.one_c_webhook_token:
+    provided_token = token or x_token or token_query
+    if not provided_token and authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            provided_token = parts[1]
+    if settings.one_c_webhook_token and provided_token != settings.one_c_webhook_token:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
     items = normalize_one_c_items(payload)
     if not items:
