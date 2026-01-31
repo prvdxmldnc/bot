@@ -44,9 +44,13 @@
 Для LLM-поиска укажите в `.env` ключ и модель. Приоритет: GigaChat → OpenAI → локальный поиск.
 
 ```
-GIGACHAT_API_KEY=ваш_токен
+GIGACHAT_OAUTH_URL=https://ngw.devices.sberbank.ru:9443/api/v2/oauth
+GIGACHAT_BASIC_AUTH_KEY=ваш_base64_ключ
+GIGACHAT_SCOPE=GIGACHAT_API_PERS
+GIGACHAT_API_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
 GIGACHAT_MODEL=GigaChat
-GIGACHAT_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
+GIGACHAT_TIMEOUT_SECONDS=20
+GIGACHAT_TOKEN_CACHE_PREFIX=gigachat:token
 
 OPENAI_API_KEY=ваш_ключ
 OPENAI_MODEL=gpt-4o-mini

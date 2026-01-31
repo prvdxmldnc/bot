@@ -2,7 +2,7 @@ import json
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
@@ -37,7 +37,7 @@ from app.crud import (
 from app.database import get_session_context
 from app.models import Message as ThreadMessage
 from app.models import OrgMember, Order, Product, Thread, User
-from app.services.llm_gigachat import parse_order, rerank_candidates
+from app.services.llm_gigachat import chat, parse_order, rerank_candidates
 from app.services.search import search_products
 from app.utils.security import hash_password, verify_password
 
@@ -82,6 +82,29 @@ async def start(message: Message) -> None:
         "Добро пожаловать в Партнер-м. Здесь вы сможете оформить заказ и провести необходимые операции с заказом, оплатой и отгрузкой.",
         reply_markup=start_keyboard(),
     )
+
+
+@router.message(Command("llm_test"))
+async def llm_test(message: Message) -> None:
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, message.from_user.id)
+    if not user or user.phone != settings.admin_phone:
+        await message.answer("Команда доступна только администратору.")
+        return
+    try:
+        response = await chat(
+            [
+                {"role": "system", "content": "Ответь одним словом: ок?"},
+                {"role": "user", "content": "ок?"},
+            ],
+            temperature=0.2,
+        )
+        content = response["choices"][0]["message"]["content"]
+    except Exception:
+        logger.exception("LLM test failed")
+        await message.answer("LLM тест не прошел. Проверьте настройки доступа.")
+        return
+    await message.answer(f"LLM ответ: {content}")
 
 
 @router.message(StateFilter("*"), _is_registration_command)

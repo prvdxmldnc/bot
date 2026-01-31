@@ -11,11 +11,13 @@ class Settings(BaseSettings):
     secret_key: str = "change-me"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
-    gigachat_api_key: str = ""
+    gigachat_oauth_url: str = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    gigachat_basic_auth_key: str = ""
+    gigachat_scope: str = "GIGACHAT_API_PERS"
+    gigachat_api_base_url: str = "https://gigachat.devices.sberbank.ru/api/v1"
     gigachat_model: str = "GigaChat"
-    gigachat_base_url: str = "https://gigachat.devices.sberbank.ru/api/v1"
     gigachat_timeout_seconds: int = 20
-    gigachat_verify_ssl: bool = True
+    gigachat_token_cache_prefix: str = "gigachat:token"
     one_c_enabled: bool = False
     one_c_base_url: str = ""
     one_c_username: str = ""
