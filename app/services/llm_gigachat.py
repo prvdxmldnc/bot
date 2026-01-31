@@ -99,14 +99,20 @@ async def parse_order(text: str) -> dict[str, Any]:
         "temperature": 0.1,
     }
     timeout = settings.gigachat_timeout_seconds or 20
-    async with httpx.AsyncClient(timeout=timeout, verify=settings.gigachat_verify_ssl) as client:
-        response = await client.post(
-            f"{settings.gigachat_base_url}/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {settings.gigachat_api_key}"},
-        )
-        response.raise_for_status()
-        data = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, verify=settings.gigachat_verify_ssl) as client:
+            response = await client.post(
+                f"{settings.gigachat_base_url}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {settings.gigachat_api_key}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError:
+        logger.exception("GigaChat parse request failed, fallback")
+        parsed = _fallback_parse(text)
+        await _set_cache(cache_key, parsed)
+        return parsed
     content = data["choices"][0]["message"]["content"]
     try:
         parsed = json.loads(content)
@@ -139,14 +145,19 @@ async def rerank_candidates(item: dict[str, Any], candidates: list[dict[str, Any
         "temperature": 0.1,
     }
     timeout = settings.gigachat_timeout_seconds or 20
-    async with httpx.AsyncClient(timeout=timeout, verify=settings.gigachat_verify_ssl) as client:
-        response = await client.post(
-            f"{settings.gigachat_base_url}/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {settings.gigachat_api_key}"},
-        )
-        response.raise_for_status()
-        data = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, verify=settings.gigachat_verify_ssl) as client:
+            response = await client.post(
+                f"{settings.gigachat_base_url}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {settings.gigachat_api_key}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError:
+        logger.exception("GigaChat rerank request failed, fallback")
+        best = max(candidates, key=lambda c: c.get("score", 0))
+        return {"best_id": best["id"], "confidence": 0.6, "reason": "fallback", "alternatives": []}
     content = data["choices"][0]["message"]["content"]
     try:
         return json.loads(content)
