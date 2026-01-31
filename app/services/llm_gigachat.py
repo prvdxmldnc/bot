@@ -132,25 +132,42 @@ async def get_access_token(redis_client: redis.Redis | None = None) -> str:
     return token
 
 
+async def _invalidate_token_cache(redis_client: redis.Redis | None = None) -> None:
+    client = redis_client or _redis_client()
+    if not client:
+        return
+    cache_prefix = settings.gigachat_token_cache_prefix or "gigachat:token"
+    await client.delete(f"{cache_prefix}:value", f"{cache_prefix}:expires_at")
+
+
 async def chat(messages: list[dict[str, str]], temperature: float = 0.2) -> dict[str, Any]:
-    token = await get_access_token()
     timeout = settings.gigachat_timeout_seconds or 20
     payload = {
         "model": settings.gigachat_model or "GigaChat",
         "messages": messages,
         "temperature": temperature,
     }
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
     async with httpx.AsyncClient(timeout=timeout) as http_client:
+        token = await get_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
         response = await http_client.post(
             f"{settings.gigachat_api_base_url}/chat/completions",
             headers=headers,
             json=payload,
         )
+        if response.status_code in {401, 403}:
+            await _invalidate_token_cache()
+            token = await get_access_token()
+            headers["Authorization"] = f"Bearer {token}"
+            response = await http_client.post(
+                f"{settings.gigachat_api_base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
         response.raise_for_status()
         return response.json()
 
