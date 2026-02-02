@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Вопросы</title>
+</head>
+<body>
+  <h1>Вопросы</h1>
+  <ul>
+    {% for thread in threads %}
+      <li>#{{ thread.id }} — {{ thread.title }} — {{ thread.created_at }}</li>
+    {% else %}
+      <li>Вопросов нет</li>
+    {% endfor %}
+  </ul>
+  <a href="/admin">Назад</a>
+</body>
+</html>
