@@ -123,7 +123,9 @@ async def get_access_token(redis_client: redis.Redis | None = None) -> str:
             logger.error("GigaChat OAuth failed status=%s", exc.response.status_code)
             raise
         except httpx.HTTPError:
-            logger.exception("GigaChat OAuth request failed")
+            logger.exception(
+                "GigaChat OAuth request failed. Container CA store missing. Ensure certs are installed in image."
+            )
             raise
 
     token = payload.get("access_token")

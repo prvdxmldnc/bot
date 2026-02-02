@@ -33,6 +33,8 @@
 Если при обращении к GigaChat появляются ошибки `CERTIFICATE_VERIFY_FAILED`,
 убедитесь, что в контейнере установлены `ca-certificates` и при необходимости
 задайте `GIGACHAT_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`.
+Для GigaChat требуется доверенный сертификат НУЦ Минцифры — он встроен в образ
+через `certs/` и `update-ca-certificates`.
 
 ## Основные функции
 
