@@ -30,6 +30,10 @@
 длинным значением. Его можно сгенерировать, например:
 `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
+Если при обращении к GigaChat появляются ошибки `CERTIFICATE_VERIFY_FAILED`,
+убедитесь, что в контейнере установлены `ca-certificates` и при необходимости
+задайте `GIGACHAT_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`.
+
 ## Основные функции
 
 - Регистрация/вход по телефону и паролю.
