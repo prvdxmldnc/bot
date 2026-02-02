@@ -35,7 +35,7 @@
 (скачивание с `gu-st.ru` + `update-ca-certificates`).
 
 Проверка TLS внутри контейнера:
-`docker compose exec bot ./scripts/smoke_gigachat_tls.sh`.
+`docker compose exec bot /app/scripts/smoke_gigachat_tls.sh`.
 
 ## Основные функции
 
