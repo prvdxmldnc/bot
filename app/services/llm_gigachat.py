@@ -114,9 +114,16 @@ async def get_access_token(redis_client: redis.Redis | None = None) -> str:
     data = {"scope": settings.gigachat_scope or "GIGACHAT_API_PERS"}
 
     async with httpx.AsyncClient(timeout=timeout) as http_client:
-        response = await http_client.post(settings.gigachat_oauth_url, headers=headers, data=data)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = await http_client.post(settings.gigachat_oauth_url, headers=headers, data=data)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error("GigaChat OAuth failed status=%s", exc.response.status_code)
+            raise
+        except httpx.HTTPError:
+            logger.exception("GigaChat OAuth request failed")
+            raise
 
     token = payload.get("access_token")
     expires_at = payload.get("expires_at")
@@ -160,6 +167,7 @@ async def chat(messages: list[dict[str, str]], temperature: float = 0.2) -> dict
             json=payload,
         )
         if response.status_code in {401, 403}:
+            logger.warning("GigaChat chat unauthorized, refreshing token")
             await _invalidate_token_cache()
             token = await get_access_token()
             headers["Authorization"] = f"Bearer {token}"
@@ -168,7 +176,11 @@ async def chat(messages: list[dict[str, str]], temperature: float = 0.2) -> dict
                 headers=headers,
                 json=payload,
             )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("GigaChat chat failed status=%s", exc.response.status_code)
+            raise
         return response.json()
 
 
