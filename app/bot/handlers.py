@@ -39,6 +39,7 @@ from app.database import get_session_context
 from app.models import Message as ThreadMessage
 from app.models import OrgMember, Order, Product, Thread, User
 from app.services.llm_gigachat import chat, get_access_token
+from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
@@ -597,6 +598,8 @@ async def handle_text_order(message: Message) -> None:
                 [],
             )
             return
+        category_ids: list[int] = []
+        llm_narrow_confidence: float | None = None
         if not candidates:
             alternatives = await suggest_queries(query or message.text)
             for alternative in alternatives:
@@ -608,7 +611,23 @@ async def handle_text_order(message: Message) -> None:
                     used_alternative = alternative
                     break
             if not candidates:
-                decision = "needs_manager"
+                category_ids = await narrow_categories(query or message.text, session)
+                llm_narrow_confidence = getattr(narrow_categories, "last_confidence", None)
+                if category_ids:
+                    retry_candidates = await search_products(
+                        session,
+                        query,
+                        limit=5,
+                        category_ids=category_ids,
+                    )
+                    if retry_candidates:
+                        candidates = retry_candidates
+                        candidates_count = len(candidates)
+                        decision = "llm_narrow_ok"
+                    else:
+                        decision = "needs_manager"
+                else:
+                    decision = "needs_manager"
         log_payload = _build_search_log_payload(
             parsed_items,
             query,
@@ -616,6 +635,8 @@ async def handle_text_order(message: Message) -> None:
             used_alternative,
             candidates_count,
             decision,
+            category_ids=category_ids,
+            llm_narrow_confidence=llm_narrow_confidence,
         )
         logger.info("Search decision: %s", log_payload)
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
@@ -668,6 +689,8 @@ def _build_search_log_payload(
     used_alternative: str | None,
     candidates_count_final: int,
     decision: str,
+    category_ids: list[int] | None = None,
+    llm_narrow_confidence: float | None = None,
 ) -> dict[str, object]:
     return {
         "parsed_items": parsed_items,
@@ -676,6 +699,8 @@ def _build_search_log_payload(
         "used_alternative": used_alternative,
         "candidates_count_final": candidates_count_final,
         "decision": decision,
+        "category_ids": category_ids or [],
+        "llm_narrow_confidence": llm_narrow_confidence,
     }
 
 
