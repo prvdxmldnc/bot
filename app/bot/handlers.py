@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.keyboards import (
@@ -564,26 +565,27 @@ async def handle_text_order(message: Message) -> None:
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
         parsed_items = parse_order_text(message.text)
-        logger.info("Parsed order items: %s", parsed_items)
+        item = parsed_items[0] if parsed_items else {}
+        query = item.get("query") or item.get("raw") or ""
+        candidates = await search_products(session, query, limit=5) if parsed_items else []
+        candidates_count = len(candidates)
+        decision = "local_ok" if candidates_count > 0 else "needs_llm"
+        log_payload = {
+            "parsed_items": parsed_items,
+            "query": query,
+            "candidates_count": candidates_count,
+            "decision": decision,
+        }
+        logger.info("Search decision: %s", log_payload)
+        await _persist_search_log(session, user.id, message.text, log_payload, candidates)
         if not parsed_items:
             await message.answer("Не удалось разобрать сообщение. Напишите, что нужно.")
             return
-        item = parsed_items[0]
-        candidates = await search_products(session, item.get("query") or item.get("raw") or "", limit=5)
         if not candidates:
             await message.answer("Ничего не найдено. Уточните запрос.")
             return
         lines = [f"{idx}. {c['title_ru']} (SKU: {c['sku']})" for idx, c in enumerate(candidates, start=1)]
         await message.answer("Вот что нашлось:\n" + "\n".join(lines))
-        await create_search_log(
-            session,
-            user.id,
-            message.text,
-            parsed_json=json.dumps(parsed_items, ensure_ascii=False),
-            selected_json=json.dumps(candidates, ensure_ascii=False),
-            confidence=0.0,
-        )
-        await session.commit()
         await _notify_manager(message, user)
         return
     await message.answer("Не удалось обработать запрос.")
@@ -597,6 +599,28 @@ async def _notify_manager(message: Message, user: User) -> None:
             manager.tg_id,
             f"Новое сообщение от {user.fio} ({user.phone}): {message.text}",
         )
+
+
+async def _persist_search_log(
+    session: AsyncSession,
+    user_id: int | None,
+    text: str,
+    log_payload: dict[str, object],
+    candidates: list[dict[str, object]],
+) -> None:
+    try:
+        await create_search_log(
+            session,
+            user_id,
+            text,
+            parsed_json=json.dumps(log_payload, ensure_ascii=False),
+            selected_json=json.dumps(candidates, ensure_ascii=False),
+            confidence=0.0,
+        )
+        await session.commit()
+    except Exception:
+        logger.warning("Failed to persist search log", exc_info=True)
+        await session.rollback()
 
 
 @router.message(F.text == "Восстановить данные")
