@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import hashlib
 import json
 import logging
@@ -113,7 +114,7 @@ async def get_access_token(redis_client: redis.Redis | None = None) -> str:
     }
     data = {"scope": settings.gigachat_scope or "GIGACHAT_API_PERS"}
 
-    async with httpx.AsyncClient(timeout=timeout) as http_client:
+    async with httpx.AsyncClient(timeout=timeout, verify=os.getenv("SSL_CERT_FILE") or True) as http_client:
         try:
             response = await http_client.post(settings.gigachat_oauth_url, headers=headers, data=data)
             response.raise_for_status()
@@ -154,7 +155,7 @@ async def chat(messages: list[dict[str, str]], temperature: float = 0.2) -> dict
         "messages": messages,
         "temperature": temperature,
     }
-    async with httpx.AsyncClient(timeout=timeout) as http_client:
+    async with httpx.AsyncClient(timeout=timeout, verify=os.getenv("SSL_CERT_FILE") or True) as http_client:
         token = await get_access_token()
         headers = {
             "Authorization": f"Bearer {token}",
