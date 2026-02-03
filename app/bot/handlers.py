@@ -570,7 +570,7 @@ async def handle_text_order(message: Message) -> None:
         parsed_items = parse_order_text(message.text)
         handler_result = handle_request_message(
             message.text,
-            DialogContext(user_id=user.id, channel="telegram"),
+            DialogContext(last_state=None, last_items=[], topic="unknown"),
         )
         logger.info("Request handler result: %s", handler_result.model_dump())
         item = parsed_items[0] if parsed_items else {}

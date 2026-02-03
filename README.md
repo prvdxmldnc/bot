@@ -280,24 +280,38 @@ cat /var/backups/partner-m/partner-m-YYYY-MM-DD.sql | docker compose exec -T db 
 ## Request Handler (MVP)
 
 Минимальный обработчик запросов без БД/поиска/сети. Принимает текст и возвращает
-структурированный результат с интентом, состоянием и разобранными позициями.
+структурированный результат с интентами, состоянием и разобранными позициями.
 
 Пример:
 
 ```json
 {
-  "text": "Саморез 4х25 -4т.шт жёлтый добавьте пожалуйста",
-  "intent": "order.add",
-  "state": "order_ready",
+  "intents": [
+    { "name": "order.add", "confidence": 0.8 }
+  ],
+  "state": "S5_DRAFT",
   "items": [
     {
-      "name": "саморез 4х25 жёлтый добавьте пожалуйста",
+      "raw": "саморез 4х25 -4т.шт жёлтый",
+      "normalized": "саморез 4x25 жёлтый",
       "qty": 4000,
       "unit": "шт",
-      "attrs": {}
+      "attributes": {
+        "size": "4x25",
+        "color": "жёлтый",
+        "code": null,
+        "din": null,
+        "notes": null
+      },
+      "confidence": 0.6
     }
   ],
   "need_clarification": [],
-  "confidence": 1.0
+  "context_updates": {
+    "last_items": [
+      { "raw": "саморез 4х25 -4т.шт жёлтый", "normalized": "саморез 4x25 жёлтый" }
+    ],
+    "topic": "order"
+  }
 }
 ```

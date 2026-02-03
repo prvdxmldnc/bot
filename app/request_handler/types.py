@@ -1,45 +1,68 @@
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
-class Intent(str, Enum):
-    ORDER_ADD = "order.add"
-    ORDER_UPDATE = "order.update"
-    STOCK_CHECK = "stock.check"
-    STOCK_ETA = "stock.eta"
-    PRODUCT_MATCH = "product.match"
-    INQUIRY_GENERAL = "inquiry.general"
-    SMALLTALK = "smalltalk"
-
-
-class NeedClarification(str, Enum):
-    MISSING_ITEM = "missing_item"
-    MISSING_QTY = "missing_qty"
-    AMBIGUOUS = "ambiguous"
+Topic = Literal["order", "stock", "match", "unknown"]
+State = Literal["S0_IDLE", "S1_INTAKE", "S2_CLARIFY", "S5_DRAFT", "S7_HANDOFF"]
+Unit = Literal[
+    "шт",
+    "кг",
+    "кор",
+    "уп",
+    "рулон",
+    "комплект",
+    "м",
+    "пог.м",
+    "каркас",
+    "позиция",
+]
+ClarifyField = Literal["item", "qty", "unit", "size", "color", "target_item"]
 
 
 class DialogContext(BaseModel):
-    user_id: int | None = None
-    channel: str = "telegram"
-    locale: str = "ru"
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    last_state: str | None = None
+    last_items: list[dict[str, str]] = Field(default_factory=list)
+    topic: Topic | None = None
+
+
+class IntentCandidate(BaseModel):
+    name: str
+    confidence: float
+
+
+class ItemAttributes(BaseModel):
+    size: str | None = None
+    color: str | None = None
+    code: str | None = None
+    din: str | None = None
+    notes: str | None = None
 
 
 class Item(BaseModel):
-    name: str
-    qty: int | None = None
-    unit: str | None = None
-    attrs: dict[str, Any] = Field(default_factory=dict)
+    raw: str
+    normalized: str
+    qty: float | None = None
+    unit: Unit | None = None
+    attributes: ItemAttributes = Field(default_factory=ItemAttributes)
+    confidence: float = 0.0
+
+
+class NeedClarification(BaseModel):
+    field: ClarifyField
+    reason: str
+
+
+class ContextUpdates(BaseModel):
+    last_items: list[dict[str, str]] = Field(default_factory=list)
+    topic: Topic = "unknown"
 
 
 class HandlerResult(BaseModel):
-    text: str
-    intent: Intent
-    state: str
-    items: list[Item] = Field(default_factory=list)
-    need_clarification: list[NeedClarification] = Field(default_factory=list)
-    confidence: float = 0.0
+    intents: list[IntentCandidate]
+    state: State
+    items: list[Item]
+    need_clarification: list[NeedClarification]
+    context_updates: ContextUpdates
