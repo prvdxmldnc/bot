@@ -23,6 +23,32 @@
 - вопросы,
 - поиск (LLM при наличии ключа).
 
+Для команд администратора в Telegram (например, `/llm_test`) можно задать
+`ADMIN_TG_ID` или `ADMIN_TG_USERNAME` в `.env`, если телефон скрыт.
+
+`SECRET_KEY` используется для внутренних подписей/хэшей и должен быть уникальным
+длинным значением. Его можно сгенерировать, например:
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
+Если при обращении к GigaChat появляются ошибки `CERTIFICATE_VERIFY_FAILED`,
+в контейнер автоматически ставятся сертификаты НУЦ Минцифры при сборке образа
+(скачивание с `gu-st.ru` + `update-ca-certificates`).
+
+Проверка TLS внутри контейнера:
+`docker compose exec bot /app/scripts/smoke_gigachat_tls.sh`.
+
+## LLM smoke checks
+
+Команды выполняются внутри контейнера `bot`:
+
+```bash
+docker compose exec bot /app/scripts/check_llm_tls.sh
+docker compose exec bot /app/scripts/check_llm_oauth.sh
+docker compose exec bot /app/scripts/check_llm_chat.sh
+```
+
+`GIGACHAT_BASIC_AUTH_KEY` — это **Authorization key (base64)** из кабинета.
+
 ## Основные функции
 
 - Регистрация/вход по телефону и паролю.
@@ -51,6 +77,7 @@ GIGACHAT_API_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
 GIGACHAT_MODEL=GigaChat
 GIGACHAT_TIMEOUT_SECONDS=20
 GIGACHAT_TOKEN_CACHE_PREFIX=gigachat:token
+GIGACHAT_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 OPENAI_API_KEY=ваш_ключ
 OPENAI_MODEL=gpt-4o-mini
@@ -248,4 +275,29 @@ sudo crontab -e
 
 ```bash
 cat /var/backups/partner-m/partner-m-YYYY-MM-DD.sql | docker compose exec -T db psql -U bot bot
+```
+
+## Request Handler (MVP)
+
+Минимальный обработчик запросов без БД/поиска/сети. Принимает текст и возвращает
+структурированный результат с интентом, состоянием и разобранными позициями.
+
+Пример:
+
+```json
+{
+  "text": "Саморез 4х25 -4т.шт жёлтый добавьте пожалуйста",
+  "intent": "order.add",
+  "state": "order_ready",
+  "items": [
+    {
+      "name": "саморез 4х25 жёлтый добавьте пожалуйста",
+      "qty": 4000,
+      "unit": "шт",
+      "attrs": {}
+    }
+  ],
+  "need_clarification": [],
+  "confidence": 1.0
+}
 ```
