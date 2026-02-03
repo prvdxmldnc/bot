@@ -20,8 +20,8 @@ _SIZE_RE = re.compile(r"(\d+)\s*[xх*]\s*(\d+)")
 
 def _normalize_query(text: str) -> str:
     normalized = text.lower()
-    normalized = normalized.replace(" на ", " x ")
-    normalized = normalized.replace("*", "x").replace("х", "x")
+    normalized = normalized.replace(" на ", " ")
+    normalized = normalized.replace("*", " ").replace("х", " ").replace("x", " ")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
 
@@ -56,6 +56,7 @@ def _score_product(product: Product, query: str, numbers: list[int]) -> float:
 
 
 async def search_products(session: AsyncSession, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    original = query.strip().lower()
     q = _normalize_query(query)
     numbers = _extract_numbers(q)
     base = select(Product)
@@ -63,10 +64,6 @@ async def search_products(session: AsyncSession, query: str, limit: int = 10) ->
     if numbers:
         for num in numbers:
             filters.append(Product.title_ru.ilike(f"%{num}%"))
-        size_match = _SIZE_RE.search(q)
-        if size_match:
-            size_token = f"{size_match.group(1)}x{size_match.group(2)}"
-            filters.append(Product.title_ru.ilike(f"%{size_token}%"))
         base = base.where(and_(*filters))
     else:
         base = base.where(Product.title_ru.ilike(f"%{q}%"))
@@ -76,6 +73,8 @@ async def search_products(session: AsyncSession, query: str, limit: int = 10) ->
         for word in q.split():
             if not word.isdigit() and len(word) > 1:
                 products = [p for p in products if word in (p.title_ru or "").lower()]
+    if "din" in original:
+        products = [p for p in products if "din" in (p.title_ru or "").lower()]
     scored = [
         {"product": product, "score": _score_product(product, q, numbers)}
         for product in products
