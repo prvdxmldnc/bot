@@ -69,6 +69,16 @@ async def search_products(session: AsyncSession, query: str, limit: int = 10) ->
         base = base.where(Product.title_ru.ilike(f"%{q}%"))
     result = await session.execute(base.limit(100))
     products = list(result.scalars().all())
+    if not products and len(numbers) >= 3:
+        size_match = _SIZE_RE.search(original)
+        if size_match:
+            main_numbers = [int(size_match.group(1)), int(size_match.group(2))]
+        else:
+            main_numbers = numbers[:2]
+        fallback_filters = [Product.title_ru.ilike(f"%{num}%") for num in main_numbers]
+        fallback_query = select(Product).where(and_(*fallback_filters)).limit(100)
+        fallback_result = await session.execute(fallback_query)
+        products = list(fallback_result.scalars().all())
     if q:
         for word in q.split():
             if not word.isdigit() and len(word) > 1:
