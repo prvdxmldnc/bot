@@ -16,14 +16,24 @@ from app.services.llm_gigachat import chat
 logger = logging.getLogger(__name__)
 
 _SIZE_RE = re.compile(r"(\d+)\s*[xх*]\s*(\d+)")
+_SIZE_SEPARATOR_RE = re.compile(r"(\d)\s*[xх*]\s*(\d)", re.IGNORECASE)
+_SIZE_NA_RE = re.compile(r"(\d)\s+на\s+(\d)", re.IGNORECASE)
 
 
 def _normalize_query(text: str) -> str:
     normalized = text.lower()
-    normalized = normalized.replace(" на ", " ")
-    normalized = normalized.replace("*", " ").replace("х", " ").replace("x", " ")
+    normalized = _SIZE_SEPARATOR_RE.sub(r"\1 \2", normalized)
+    normalized = _SIZE_NA_RE.sub(r"\1 \2", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _normalization_examples() -> list[tuple[str, str]]:
+    return [
+        ("механизм подъема", "механизм подъема"),
+        ("8х30", "8 30"),
+        ("1010 x 40", "1010 40"),
+    ]
 
 
 def _extract_numbers(text: str) -> list[int]:
@@ -104,6 +114,12 @@ async def search_products(session: AsyncSession, query: str, limit: int = 10) ->
         }
         for item in scored[:limit]
     ]
+
+
+if __name__ == "__main__":
+    for raw, expected in _normalization_examples():
+        got = _normalize_query(raw)
+        assert got == expected, f"{raw!r} -> {got!r}, expected {expected!r}"
 
 
 def _parse_llm_content(content: str, source: str) -> list[dict[str, Any]]:
