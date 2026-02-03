@@ -37,7 +37,8 @@ from app.crud import (
 from app.database import get_session_context
 from app.models import Message as ThreadMessage
 from app.models import OrgMember, Order, Product, Thread, User
-from app.services.llm_gigachat import chat, get_access_token, rerank_candidates, safe_parse_order
+from app.services.llm_gigachat import chat, get_access_token
+from app.services.order_parser import parse_order_text
 from app.services.search import search_products
 from app.utils.security import hash_password, verify_password
 
@@ -76,6 +77,15 @@ def _phones_match(a: str | None, b: str | None) -> bool:
     return na[-10:] == nb[-10:]
 
 
+def _admin_tg_match(message: Message) -> bool:
+    if settings.admin_tg_id and message.from_user.id == settings.admin_tg_id:
+        return True
+    if settings.admin_tg_username:
+        username = (message.from_user.username or "").lower()
+        return username == settings.admin_tg_username.lower().lstrip("@")
+    return False
+
+
 async def _handle_auth_interrupts(message: Message, state: FSMContext) -> bool:
     if _is_login_command(message):
         await login_start(message, state)
@@ -98,7 +108,15 @@ async def start(message: Message) -> None:
 async def llm_test(message: Message) -> None:
     async with get_session_context() as session:
         user = await get_user_by_tg_id(session, message.from_user.id)
-    if not user or (user.role != "admin" and not _phones_match(user.phone, settings.admin_phone)):
+    if not user:
+        if not _admin_tg_match(message):
+            await message.answer("Команда доступна только администратору.")
+            return
+    elif (
+        user.role != "admin"
+        and not _phones_match(user.phone, settings.admin_phone)
+        and not _admin_tg_match(message)
+    ):
         await message.answer("Команда доступна только администратору.")
         return
     try:
@@ -545,59 +563,27 @@ async def handle_text_order(message: Message) -> None:
             return
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
-        parsed = await safe_parse_order(message.text)
-        items = parsed.get("items") or []
-        selected = []
-        low_confidence = False
-        order = await get_or_create_draft_order(session, user)
-        for item in items:
-            candidates = await search_products(session, item.get("query") or item.get("raw") or "", limit=10)
-            rerank = await rerank_candidates(item, candidates)
-            best_id = rerank.get("best_id")
-            confidence = float(rerank.get("confidence") or 0)
-            selected.append(
-                {"item": item, "best_id": best_id, "confidence": confidence, "candidates": candidates[:5]}
-            )
-            if not best_id or confidence < 0.78:
-                low_confidence = True
-                continue
-            result = await session.execute(select(Product).where(Product.id == best_id))
-            product = result.scalar_one_or_none()
-            if product:
-                await add_item_to_order(session, order, product, qty=int(item.get("qty") or 1))
+        parsed_items = parse_order_text(message.text)
+        logger.info("Parsed order items: %s", parsed_items)
+        if not parsed_items:
+            await message.answer("Не удалось разобрать сообщение. Напишите, что нужно.")
+            return
+        item = parsed_items[0]
+        candidates = await search_products(session, item.get("query") or item.get("raw") or "", limit=5)
+        if not candidates:
+            await message.answer("Ничего не найдено. Уточните запрос.")
+            return
+        lines = [f"{idx}. {c['title_ru']} (SKU: {c['sku']})" for idx, c in enumerate(candidates, start=1)]
+        await message.answer("Вот что нашлось:\n" + "\n".join(lines))
         await create_search_log(
             session,
             user.id,
             message.text,
-            parsed_json=json.dumps(parsed, ensure_ascii=False),
-            selected_json=json.dumps(selected, ensure_ascii=False),
-            confidence=max((s["confidence"] for s in selected), default=0.0),
+            parsed_json=json.dumps(parsed_items, ensure_ascii=False),
+            selected_json=json.dumps(candidates, ensure_ascii=False),
+            confidence=0.0,
         )
         await session.commit()
-        if low_confidence:
-            thread = await create_thread(
-                session,
-                user.org_memberships[0].org_id if user.org_memberships else None,
-                "Автоподбор: требуется уточнение",
-            )
-            session.add(
-                ThreadMessage(
-                    thread_id=thread.id,
-                    author_user_id=user.id,
-                    author_name_snapshot=user.fio,
-                    text=f"Запрос: {message.text}\nParsed: {json.dumps(parsed, ensure_ascii=False)}",
-                )
-            )
-            await session.commit()
-            await message.answer(
-                "Не удалось однозначно подобрать товары — передали менеджеру. Он свяжется с вами."
-            )
-            await _notify_manager(message, user)
-            return
-        await message.answer(
-            "Автоподбор выполнен. Проверьте черновик заказа и нажмите «Оформить».",
-            reply_markup=main_menu_keyboard(),
-        )
         await _notify_manager(message, user)
         return
     await message.answer("Не удалось обработать запрос.")
