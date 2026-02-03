@@ -73,12 +73,14 @@ async def search_products(session: AsyncSession, query: str, limit: int = 10) ->
         for word in q.split():
             if not word.isdigit() and len(word) > 1:
                 products = [p for p in products if word in (p.title_ru or "").lower()]
-    if "din" in original:
-        products = [p for p in products if "din" in (p.title_ru or "").lower()]
-    scored = [
-        {"product": product, "score": _score_product(product, q, numbers)}
-        for product in products
-    ]
+    scored = []
+    for product in products:
+        score = _score_product(product, q, numbers)
+        if "din" in original and 933 in numbers:
+            title = (product.title_ru or "").lower()
+            if "din" in title and "933" in title:
+                score += 2.5
+        scored.append({"product": product, "score": score})
     scored.sort(key=lambda item: item["score"], reverse=True)
     logger.info("search_products query=%s numbers=%s results=%s", q, numbers, len(scored))
     return [
