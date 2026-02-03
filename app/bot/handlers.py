@@ -601,6 +601,7 @@ async def handle_text_order(message: Message) -> None:
         category_ids: list[int] = []
         llm_narrow_confidence: float | None = None
         llm_narrow_reason: str | None = None
+        narrowed_query: str | None = None
         if not candidates:
             alternatives = await suggest_queries(query or message.text)
             for alternative in alternatives:
@@ -612,7 +613,12 @@ async def handle_text_order(message: Message) -> None:
                     used_alternative = alternative
                     break
             if not candidates:
-                narrow_result = await narrow_categories(query or message.text, session)
+                narrowed_query = (
+                    handler_result.items[0].normalized
+                    if handler_result.items
+                    else (query or message.text)
+                )
+                narrow_result = await narrow_categories(narrowed_query, session)
                 category_ids = narrow_result.get("category_ids", [])
                 llm_narrow_confidence = narrow_result.get("confidence")
                 llm_narrow_reason = narrow_result.get("reason")
@@ -655,6 +661,7 @@ async def handle_text_order(message: Message) -> None:
             category_ids=category_ids,
             llm_narrow_confidence=llm_narrow_confidence,
             llm_narrow_reason=llm_narrow_reason,
+            narrowed_query=narrowed_query,
         )
         logger.info("Search decision: %s", log_payload)
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
@@ -710,6 +717,7 @@ def _build_search_log_payload(
     category_ids: list[int] | None = None,
     llm_narrow_confidence: float | None = None,
     llm_narrow_reason: str | None = None,
+    narrowed_query: str | None = None,
 ) -> dict[str, object]:
     return {
         "parsed_items": parsed_items,
@@ -721,6 +729,7 @@ def _build_search_log_payload(
         "category_ids": category_ids or [],
         "llm_narrow_confidence": llm_narrow_confidence,
         "llm_narrow_reason": llm_narrow_reason,
+        "narrowed_query": narrowed_query,
     }
 
 
