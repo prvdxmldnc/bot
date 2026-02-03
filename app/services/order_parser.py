@@ -5,6 +5,7 @@ from typing import Any
 
 _SPLIT_RE = re.compile(r"[\n;,]+")
 _QTY_UNIT_RE = re.compile(r"(?P<qty>\d+)\s*(?P<unit>шт|кг|уп|м)\b", re.IGNORECASE)
+_QTY_THOUSAND_RE = re.compile(r"(?P<qty>\d+)\s*т\.?\s*шт\b", re.IGNORECASE)
 _NUM_RE = re.compile(r"\d+")
 _SIZE_X_RE = re.compile(r"(\d)\s*[xх*]\s*(\d)", re.IGNORECASE)
 
@@ -26,6 +27,11 @@ def _normalization_examples() -> list[tuple[str, str]]:
 
 
 def _extract_qty_unit(text: str) -> tuple[int, str, str]:
+    match = _QTY_THOUSAND_RE.search(text)
+    if match:
+        qty = int(match.group("qty")) * 1000
+        cleaned = (text[: match.start()] + text[match.end() :]).strip()
+        return qty, "шт", cleaned
     match = _QTY_UNIT_RE.search(text)
     if not match:
         return 1, "", text
@@ -44,6 +50,8 @@ def parse_order_text(text: str) -> list[dict[str, Any]]:
         normalized = _normalize(raw)
         qty, unit, cleaned = _extract_qty_unit(normalized)
         numbers = [int(n) for n in _NUM_RE.findall(cleaned)]
+        if unit:
+            numbers = [n for n in numbers if n != qty]
         query = cleaned.strip()
         items.append(
             {
@@ -62,3 +70,14 @@ if __name__ == "__main__":
     for raw, expected in _normalization_examples():
         got = _normalize(raw)
         assert got == expected, f"{raw!r} -> {got!r}, expected {expected!r}"
+    examples = [
+        ("гайка ус 6мм-2т.шт", 2000, "шт", {6}, {2}),
+        ("саморез 4х25 -4т.шт жёлтый", 4000, "шт", {4, 25}, set()),
+        ("болт 8*30 дин 933 10шт", 10, "шт", {8, 30, 933}, {10}),
+    ]
+    for raw, qty_expected, unit_expected, must_have, must_not_have in examples:
+        parsed = parse_order_text(raw)[0]
+        assert parsed["qty"] == qty_expected, raw
+        assert parsed["unit"] == unit_expected, raw
+        assert must_have.issubset(set(parsed["numbers"])), raw
+        assert must_not_have.isdisjoint(set(parsed["numbers"])), raw
