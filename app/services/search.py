@@ -65,11 +65,18 @@ def _score_product(product: Product, query: str, numbers: list[int]) -> float:
     return score
 
 
-async def search_products(session: AsyncSession, query: str, limit: int = 10) -> list[dict[str, Any]]:
+async def search_products(
+    session: AsyncSession,
+    query: str,
+    limit: int = 10,
+    category_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
     original = query.strip().lower()
     q = _normalize_query(query)
     numbers = _extract_numbers(q)
     base = select(Product)
+    if category_ids:
+        base = base.where(Product.category_id.in_(category_ids))
     filters = []
     if numbers:
         for num in numbers:
