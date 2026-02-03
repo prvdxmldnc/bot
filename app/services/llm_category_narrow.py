@@ -10,13 +10,13 @@ from app.services.llm_gigachat import chat
 logger = logging.getLogger(__name__)
 
 
-async def narrow_categories(query: str, session) -> list[int]:
+async def narrow_categories(user_text: str, session) -> dict[str, Any]:
     manifest = await get_category_manifest(session)
     filtered = []
     for item in manifest:
         title = (item.get("title") or "").lower()
         path = (item.get("path") or "").lower()
-        if any(token in title or token in path for token in ["удален", "устарел", "тест", "cat"]):
+        if any(token in title or token in path for token in ["удален", "устарел", "тест", "test", "cat"]):
             continue
         if item.get("count_direct", 0) <= 0:
             continue
@@ -40,28 +40,24 @@ async def narrow_categories(query: str, session) -> list[int]:
         response = await chat(
             [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps({"query": query, "categories": context_items})},
+                {"role": "user", "content": json.dumps({"query": user_text, "categories": context_items})},
             ],
             temperature=0.2,
         )
     except Exception:
         logger.exception("LLM category narrow failed")
-        return []
+        return {"category_ids": [], "confidence": 0.0, "reason": "llm_failed"}
     content = response["choices"][0]["message"]["content"]
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        return []
+        return {"category_ids": [], "confidence": 0.0, "reason": "parse_failed"}
     if not isinstance(data, dict):
-        return []
+        return {"category_ids": [], "confidence": 0.0, "reason": "parse_failed"}
     ids = data.get("category_ids")
     confidence = data.get("confidence")
-    try:
-        narrow_categories.last_confidence = float(confidence)
-    except (TypeError, ValueError):
-        narrow_categories.last_confidence = None
     if not isinstance(ids, list):
-        return []
+        return {"category_ids": [], "confidence": 0.0, "reason": "parse_failed"}
     cleaned: list[int] = []
     seen = set()
     for value in ids:
@@ -75,7 +71,12 @@ async def narrow_categories(query: str, session) -> list[int]:
         cleaned.append(category_id)
         if len(cleaned) >= 5:
             break
-    return cleaned
-
-
-narrow_categories.last_confidence = None
+    try:
+        parsed_confidence = float(confidence)
+    except (TypeError, ValueError):
+        parsed_confidence = 0.0
+    return {
+        "category_ids": cleaned,
+        "confidence": parsed_confidence,
+        "reason": str(data.get("reason") or ""),
+    }

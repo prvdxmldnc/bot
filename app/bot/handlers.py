@@ -611,8 +611,9 @@ async def handle_text_order(message: Message) -> None:
                     used_alternative = alternative
                     break
             if not candidates:
-                category_ids = await narrow_categories(query or message.text, session)
-                llm_narrow_confidence = getattr(narrow_categories, "last_confidence", None)
+                narrow_result = await narrow_categories(query or message.text, session)
+                category_ids = narrow_result.get("category_ids", [])
+                llm_narrow_confidence = narrow_result.get("confidence")
                 if category_ids:
                     retry_candidates = await search_products(
                         session,
