@@ -90,6 +90,21 @@ def test_smalltalk_idle():
     assert result.state == "S0_IDLE"
 
 
+def test_order_state_not_handoff_with_qty_unit():
+    result = handle_message("Саморез 4х25 -4т.шт жёлтый добавьте пожалуйста")
+    assert result.state == "S5_DRAFT"
+
+
+def test_patch_state_clarify():
+    result = handle_message("1 кор")
+    assert result.state == "S2_CLARIFY"
+
+
+def test_smalltalk_single_word():
+    result = handle_message("Привет")
+    assert result.state == "S0_IDLE"
+
+
 def test_draft_confirm():
     result = handle_message("Подтверждаю заказ")
     assert result.intents[0].name == "draft.confirm"
