@@ -276,3 +276,28 @@ sudo crontab -e
 ```bash
 cat /var/backups/partner-m/partner-m-YYYY-MM-DD.sql | docker compose exec -T db psql -U bot bot
 ```
+
+## Request Handler (MVP)
+
+Минимальный обработчик запросов без БД/поиска/сети. Принимает текст и возвращает
+структурированный результат с интентом, состоянием и разобранными позициями.
+
+Пример:
+
+```json
+{
+  "text": "Саморез 4х25 -4т.шт жёлтый добавьте пожалуйста",
+  "intent": "order.add",
+  "state": "order_ready",
+  "items": [
+    {
+      "name": "саморез 4х25 жёлтый добавьте пожалуйста",
+      "qty": 4000,
+      "unit": "шт",
+      "attrs": {}
+    }
+  ],
+  "need_clarification": [],
+  "confidence": 1.0
+}
+```

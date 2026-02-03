@@ -42,6 +42,8 @@ from app.services.llm_gigachat import chat, get_access_token
 from app.services.llm_normalize import suggest_queries
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
+from app.request_handler import handle_message as handle_request_message
+from app.request_handler.types import DialogContext
 from app.utils.security import hash_password, verify_password
 
 router = Router()
@@ -566,6 +568,11 @@ async def handle_text_order(message: Message) -> None:
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
         parsed_items = parse_order_text(message.text)
+        handler_result = handle_request_message(
+            message.text,
+            DialogContext(user_id=user.id, channel="telegram"),
+        )
+        logger.info("Request handler result: %s", handler_result.model_dump())
         item = parsed_items[0] if parsed_items else {}
         query = item.get("query") or item.get("raw") or ""
         candidates = await search_products(session, query, limit=5) if parsed_items else []
