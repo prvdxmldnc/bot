@@ -16,12 +16,38 @@ _QTY_UNIT_RE = re.compile(
     r")\b",
     flags=re.IGNORECASE,
 )
+_AUTOLEARN_STOPWORDS = {
+    "ок",
+    "спасибо",
+    "привет",
+    "здравствуйте",
+    "да",
+    "нет",
+}
+_NON_WORDS_RE = re.compile(r"[^\w\s-]+", flags=re.UNICODE)
 
 
 def normalize_alias(text: str) -> str:
     cleaned = text.lower().strip()
     cleaned = _QTY_UNIT_RE.sub(" ", cleaned)
     cleaned = _SPACES_RE.sub(" ", cleaned)
+    return cleaned[:255]
+
+
+def normalize_alias_for_autolearn(text: str) -> str:
+    cleaned = text.lower().strip()
+    cleaned = _QTY_UNIT_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace("-", " ")
+    cleaned = _NON_WORDS_RE.sub(" ", cleaned)
+    cleaned = _SPACES_RE.sub(" ", cleaned).strip()
+    if not cleaned or cleaned in _AUTOLEARN_STOPWORDS:
+        return ""
+    if not re.search(r"[a-zа-я]", cleaned, flags=re.IGNORECASE):
+        numbers = re.findall(r"\d+", cleaned)
+        if len(numbers) < 2:
+            return ""
+    if len(cleaned) < 4:
+        return ""
     return cleaned[:255]
 
 
@@ -88,3 +114,16 @@ async def find_org_alias_candidates(
     )
     result = await session.execute(stmt)
     return [row[0] for row in result.all()]
+
+
+async def autolearn_org_alias(
+    session: AsyncSession,
+    org_id: int,
+    alias_text: str,
+    product_id: int,
+) -> bool:
+    normalized = normalize_alias_for_autolearn(alias_text)
+    if not normalized:
+        return False
+    await upsert_org_alias(session, org_id, normalized, product_id)
+    return True
