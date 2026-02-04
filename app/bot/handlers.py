@@ -576,10 +576,14 @@ async def handle_text_order(message: Message) -> None:
         )
         logger.info("Request handler result: %s", handler_result.model_dump())
         item = parsed_items[0] if parsed_items else {}
-        query = item.get("query") or item.get("raw") or ""
+        fallback_query = item.get("query") or item.get("raw") or ""
+        primary_query = handler_result.items[0].normalized if handler_result.items else fallback_query
+        query = fallback_query
         history_org_id: int | None = None
         history_candidates_count = 0
         history_used = False
+        history_query_used: str | None = None
+        history_candidates_found = 0
         candidates: list[dict[str, object]] = []
         if parsed_items:
             result = await session.execute(
@@ -593,14 +597,16 @@ async def handle_text_order(message: Message) -> None:
                 if history_candidate_ids:
                     candidates = await search_products(
                         session,
-                        query,
+                        primary_query,
                         limit=5,
                         product_ids=history_candidate_ids,
                     )
                     if candidates:
                         history_used = True
+                        history_query_used = primary_query
+                        history_candidates_found = len(candidates)
         if parsed_items and not candidates:
-            candidates = await search_products(session, query, limit=5)
+            candidates = await search_products(session, fallback_query, limit=5)
         candidates_count = len(candidates)
         decision = "history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm")
         alternatives: list[str] = []
@@ -640,7 +646,7 @@ async def handle_text_order(message: Message) -> None:
                 narrowed_query = (
                     handler_result.items[0].normalized
                     if handler_result.items
-                    else (query or message.text)
+                    else (fallback_query or message.text)
                 )
                 narrow_result = await narrow_categories(narrowed_query, session)
                 category_ids = narrow_result.get("category_ids", [])
@@ -689,6 +695,8 @@ async def handle_text_order(message: Message) -> None:
             history_org_id=history_org_id,
             history_candidates_count=history_candidates_count,
             history_used=history_used,
+            history_query_used=history_query_used,
+            history_candidates_found=history_candidates_found,
         )
         logger.info("Search decision: %s", log_payload)
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
@@ -748,6 +756,8 @@ def _build_search_log_payload(
     history_org_id: int | None = None,
     history_candidates_count: int = 0,
     history_used: bool = False,
+    history_query_used: str | None = None,
+    history_candidates_found: int = 0,
 ) -> dict[str, object]:
     return {
         "parsed_items": parsed_items,
@@ -763,6 +773,8 @@ def _build_search_log_payload(
         "history_org_id": history_org_id,
         "history_candidates_count": history_candidates_count,
         "history_used": history_used,
+        "history_query_used": history_query_used,
+        "history_candidates_found": history_candidates_found,
     }
 
 
