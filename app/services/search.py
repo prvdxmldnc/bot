@@ -70,6 +70,7 @@ async def search_products(
     query: str,
     limit: int = 10,
     category_ids: list[int] | None = None,
+    product_ids: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     original = query.strip().lower()
     q = _normalize_query(query)
@@ -77,6 +78,8 @@ async def search_products(
     base = select(Product)
     if category_ids:
         base = base.where(Product.category_id.in_(category_ids))
+    if product_ids:
+        base = base.where(Product.id.in_(product_ids))
     filters = []
     if numbers:
         for num in numbers:

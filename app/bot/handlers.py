@@ -43,6 +43,7 @@ from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
+from app.services.history_candidates import get_org_candidates
 from app.request_handler import handle_message as handle_request_message
 from app.request_handler.types import DialogContext
 from app.utils.security import hash_password, verify_password
@@ -576,9 +577,32 @@ async def handle_text_order(message: Message) -> None:
         logger.info("Request handler result: %s", handler_result.model_dump())
         item = parsed_items[0] if parsed_items else {}
         query = item.get("query") or item.get("raw") or ""
-        candidates = await search_products(session, query, limit=5) if parsed_items else []
+        history_org_id: int | None = None
+        history_candidates_count = 0
+        history_used = False
+        candidates: list[dict[str, object]] = []
+        if parsed_items:
+            result = await session.execute(
+                select(OrgMember).where(OrgMember.user_id == user.id, OrgMember.status == "active")
+            )
+            membership = result.scalars().first()
+            history_org_id = membership.org_id if membership else None
+            if history_org_id:
+                history_candidate_ids = await get_org_candidates(session, history_org_id, limit=200)
+                history_candidates_count = len(history_candidate_ids)
+                if history_candidate_ids:
+                    candidates = await search_products(
+                        session,
+                        query,
+                        limit=5,
+                        product_ids=history_candidate_ids,
+                    )
+                    if candidates:
+                        history_used = True
+        if parsed_items and not candidates:
+            candidates = await search_products(session, query, limit=5)
         candidates_count = len(candidates)
-        decision = "local_ok" if candidates_count > 0 else "needs_llm"
+        decision = "history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm")
         alternatives: list[str] = []
         used_alternative: str | None = None
         if not parsed_items:
@@ -662,6 +686,9 @@ async def handle_text_order(message: Message) -> None:
             llm_narrow_confidence=llm_narrow_confidence,
             llm_narrow_reason=llm_narrow_reason,
             narrowed_query=narrowed_query,
+            history_org_id=history_org_id,
+            history_candidates_count=history_candidates_count,
+            history_used=history_used,
         )
         logger.info("Search decision: %s", log_payload)
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
@@ -718,6 +745,9 @@ def _build_search_log_payload(
     llm_narrow_confidence: float | None = None,
     llm_narrow_reason: str | None = None,
     narrowed_query: str | None = None,
+    history_org_id: int | None = None,
+    history_candidates_count: int = 0,
+    history_used: bool = False,
 ) -> dict[str, object]:
     return {
         "parsed_items": parsed_items,
@@ -730,6 +760,9 @@ def _build_search_log_payload(
         "llm_narrow_confidence": llm_narrow_confidence,
         "llm_narrow_reason": llm_narrow_reason,
         "narrowed_query": narrowed_query,
+        "history_org_id": history_org_id,
+        "history_candidates_count": history_candidates_count,
+        "history_used": history_used,
     }
 
 
