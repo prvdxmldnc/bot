@@ -43,7 +43,7 @@ from app.services.llm_gigachat import chat, get_access_token
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
-from app.services.org_aliases import find_org_alias_candidates, upsert_org_alias
+from app.services.org_aliases import autolearn_org_alias, find_org_alias_candidates, normalize_alias_for_autolearn, upsert_org_alias
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
 from app.services.history_candidates import get_org_candidates
@@ -835,6 +835,36 @@ async def handle_text_order(message: Message) -> None:
             "rerank_used": rerank_used,
             "rerank_best_ids": rerank_best_ids,
             "rerank_top_score": rerank_top_score,
+        }
+        autolearn_attempted = False
+        autolearn_applied = False
+        autolearn_alias: str | None = None
+        autolearn_product_id: int | None = None
+        if history_org_id and candidates and decision != "needs_manager":
+            if len(candidates) == 1 or (rerank_top_score is not None and rerank_top_score >= 0.85):
+                autolearn_attempted = True
+                alias_text = (
+                    handler_result.items[0].normalized
+                    if handler_result.items
+                    else (narrowed_query or primary_query or fallback_query or message.text)
+                )
+                product_id = candidates[0].get("id")
+                if isinstance(product_id, int):
+                    autolearn_applied = await autolearn_org_alias(
+                        session,
+                        history_org_id,
+                        alias_text,
+                        product_id,
+                    )
+                    if autolearn_applied:
+                        autolearn_alias = normalize_alias_for_autolearn(alias_text)[:60]
+                        autolearn_product_id = product_id
+        log_payload = {
+            **log_payload,
+            "autolearn_attempted": autolearn_attempted,
+            "autolearn_applied": autolearn_applied,
+            "autolearn_alias": autolearn_alias,
+            "autolearn_product_id": autolearn_product_id,
         }
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
         lines = [f"{idx}. {c['title_ru']} (SKU: {c['sku']})" for idx, c in enumerate(candidates, start=1)]
