@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -157,3 +157,27 @@ class SearchLog(Base):
     selected_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class OrgProductStats(Base):
+    __tablename__ = "org_product_stats"
+    __table_args__ = (
+        UniqueConstraint("org_id", "product_id", name="uq_org_product_stats_org_product"),
+        Index(
+            "ix_org_product_stats_org_ordered",
+            "org_id",
+            "orders_count",
+            "last_order_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    orders_count: Mapped[int] = mapped_column(Integer, default=0)
+    qty_sum: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
+    last_order_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_qty: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    last_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
