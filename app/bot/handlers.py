@@ -4,7 +4,8 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +43,7 @@ from app.services.llm_gigachat import chat, get_access_token
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
+from app.services.org_aliases import find_org_alias_candidates, upsert_org_alias
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
 from app.services.history_candidates import get_org_candidates
@@ -51,6 +53,7 @@ from app.utils.security import hash_password, verify_password
 
 router = Router()
 logger = logging.getLogger(__name__)
+_CANDIDATES_TTL_SECONDS = 600
 
 
 def _normalized_text(message: Message) -> str:
@@ -91,6 +94,25 @@ def _admin_tg_match(message: Message) -> bool:
         username = (message.from_user.username or "").lower()
         return username == settings.admin_tg_username.lower().lstrip("@")
     return False
+
+
+def _redis_client() -> Redis | None:
+    if not settings.redis_url:
+        return None
+    return Redis.from_url(settings.redis_url)
+
+
+def _candidate_cache_key(tg_id: int, message_id: int) -> str:
+    return f"candidates:{tg_id}:{message_id}"
+
+
+def _alias_keyboard(count: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"✅ Это позиция {idx}", callback_data=f"alias:{idx}")]
+        for idx in range(1, count + 1)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Не оно", callback_data="alias:no")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _handle_auth_interrupts(message: Message, state: FSMContext) -> bool:
@@ -141,6 +163,45 @@ async def llm_test(message: Message) -> None:
         await message.answer("LLM тест не прошел. Проверьте настройки доступа.")
         return
     await message.answer(f"LLM ответ: {content}\nToken ok: {token[:6]}…")
+
+
+@router.callback_query(F.data.startswith("alias:"))
+async def alias_confirm(callback: CallbackQuery) -> None:
+    if not callback.message:
+        return
+    action = callback.data.split(":", 1)[1]
+    if action == "no":
+        await callback.answer("Понял, не оно.")
+        return
+    try:
+        index = int(action) - 1
+    except ValueError:
+        await callback.answer("Не удалось обработать выбор.")
+        return
+    redis_client = _redis_client()
+    if not redis_client:
+        await callback.answer("Контекст недоступен.")
+        return
+    cache_key = _candidate_cache_key(callback.from_user.id, callback.message.message_id)
+    cached = await redis_client.get(cache_key)
+    if not cached:
+        await callback.answer("Контекст устарел.")
+        return
+    payload = json.loads(cached)
+    products = payload.get("products") or []
+    org_id = payload.get("org_id")
+    alias_text = payload.get("alias_text") or ""
+    if not isinstance(products, list) or index < 0 or index >= len(products):
+        await callback.answer("Не удалось обработать выбор.")
+        return
+    product_id = products[index]
+    if not isinstance(product_id, int) or not org_id:
+        await callback.answer("Не удалось обработать выбор.")
+        return
+    async with get_session_context() as session:
+        await upsert_org_alias(session, org_id, alias_text, product_id)
+        await session.commit()
+    await callback.answer("Запомнил. В следующий раз буду понимать быстрее.")
 
 
 @router.message(StateFilter("*"), _is_registration_command)
@@ -585,6 +646,10 @@ async def handle_text_order(message: Message) -> None:
         history_used = False
         history_query_used: str | None = None
         history_candidates_found = 0
+        alias_candidates_count = 0
+        alias_used = False
+        alias_query_used: str | None = None
+        alias_candidates_found = 0
         candidates: list[dict[str, object]] = []
         if parsed_items:
             result = await session.execute(
@@ -593,6 +658,20 @@ async def handle_text_order(message: Message) -> None:
             membership = result.scalars().first()
             history_org_id = membership.org_id if membership else None
             if history_org_id:
+                alias_product_ids = await find_org_alias_candidates(session, history_org_id, message.text, limit=5)
+                alias_candidates_count = len(alias_product_ids)
+                if alias_product_ids:
+                    candidates = await search_products(
+                        session,
+                        primary_query,
+                        limit=5,
+                        product_ids=alias_product_ids,
+                    )
+                    if candidates:
+                        alias_used = True
+                        alias_query_used = primary_query
+                        alias_candidates_found = len(candidates)
+            if history_org_id and not candidates:
                 history_candidate_ids = await get_org_candidates(session, history_org_id, limit=200)
                 history_candidates_count = len(history_candidate_ids)
                 if history_candidate_ids:
@@ -609,7 +688,11 @@ async def handle_text_order(message: Message) -> None:
         if parsed_items and not candidates:
             candidates = await search_products(session, fallback_query, limit=5)
         candidates_count = len(candidates)
-        decision = "history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm")
+        decision = (
+            "alias_ok"
+            if alias_used
+            else ("history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm"))
+        )
         alternatives: list[str] = []
         used_alternative: str | None = None
         if not parsed_items:
@@ -698,6 +781,10 @@ async def handle_text_order(message: Message) -> None:
             history_used=history_used,
             history_query_used=history_query_used,
             history_candidates_found=history_candidates_found,
+            alias_candidates_count=alias_candidates_count,
+            alias_used=alias_used,
+            alias_query_used=alias_query_used,
+            alias_candidates_found=alias_candidates_found,
         )
         logger.info("Search decision: %s", log_payload)
         rerank_used = False
@@ -740,7 +827,19 @@ async def handle_text_order(message: Message) -> None:
         }
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
         lines = [f"{idx}. {c['title_ru']} (SKU: {c['sku']})" for idx, c in enumerate(candidates, start=1)]
-        await message.answer("Вот что нашлось:\n" + "\n".join(lines))
+        redis_client = _redis_client()
+        reply_markup = None
+        if candidates and history_org_id and redis_client:
+            reply_markup = _alias_keyboard(len(candidates))
+        sent = await message.answer("Вот что нашлось:\n" + "\n".join(lines), reply_markup=reply_markup)
+        if candidates and history_org_id and redis_client:
+            cache_key = _candidate_cache_key(message.from_user.id, sent.message_id)
+            payload = {
+                "org_id": history_org_id,
+                "alias_text": message.text,
+                "products": [c.get("id") for c in candidates if isinstance(c.get("id"), int)],
+            }
+            await redis_client.setex(cache_key, _CANDIDATES_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
         return
     await message.answer("Не удалось обработать запрос.")
 
@@ -793,6 +892,10 @@ def _build_search_log_payload(
     history_used: bool = False,
     history_query_used: str | None = None,
     history_candidates_found: int = 0,
+    alias_candidates_count: int = 0,
+    alias_used: bool = False,
+    alias_query_used: str | None = None,
+    alias_candidates_found: int = 0,
 ) -> dict[str, object]:
     return {
         "parsed_items": parsed_items,
@@ -810,6 +913,10 @@ def _build_search_log_payload(
         "history_used": history_used,
         "history_query_used": history_query_used,
         "history_candidates_found": history_candidates_found,
+        "alias_candidates_count": alias_candidates_count,
+        "alias_used": alias_used,
+        "alias_query_used": alias_query_used,
+        "alias_candidates_found": alias_candidates_found,
     }
 
 
