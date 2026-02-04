@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session
-from app.models import Organization, Product
+from app.models import OrgMember, Organization, Product, User
 from app.services.history_candidates import upsert_org_product_stats
 from app.services.one_c import upsert_catalog
 
@@ -213,6 +213,114 @@ async def process_orders_payload(session: AsyncSession, payload: Any) -> dict[st
     }
 
 
+def _extract_members_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("items"), list):
+            return [item for item in payload["items"] if isinstance(item, dict)]
+        if any(key in payload for key in ("org", "org_name", "external_id", "members")):
+            return [payload]
+    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid payload")
+
+
+async def process_members_payload(session: AsyncSession, payload: Any) -> dict[str, Any]:
+    items = _extract_members_payload(payload)
+    orgs_received = len(items)
+    orgs_upserted = 0
+    members_received = 0
+    users_created = 0
+    members_upserted = 0
+    skipped = 0
+
+    for entry in items:
+        org_payload = entry.get("org") if isinstance(entry.get("org"), dict) else {}
+        external_id = _coerce_str(org_payload.get("external_id") or entry.get("external_id"))
+        org_name = _coerce_str(org_payload.get("name") or entry.get("org_name") or entry.get("name"))
+        if not org_name and external_id:
+            org_name = external_id
+        if not org_name:
+            skipped += 1
+            continue
+
+        org = None
+        if external_id:
+            result = await session.execute(select(Organization).where(Organization.external_id == external_id))
+            org = result.scalar_one_or_none()
+        if not org:
+            result = await session.execute(select(Organization).where(Organization.name == org_name))
+            org = result.scalar_one_or_none()
+        if not org:
+            org = Organization(name=org_name, external_id=external_id or None, owner_user_id=None)
+            session.add(org)
+            await session.flush()
+            orgs_upserted += 1
+        else:
+            if external_id and org.external_id != external_id:
+                org.external_id = external_id
+            if org.name != org_name and org_name:
+                org.name = org_name
+
+        members = entry.get("members") if isinstance(entry.get("members"), list) else []
+        for member in members:
+            if not isinstance(member, dict):
+                skipped += 1
+                continue
+            members_received += 1
+            phone = _coerce_str(member.get("phone"))
+            if not phone:
+                skipped += 1
+                continue
+            fio = _coerce_str(member.get("fio")) or phone
+            role_in_org = _coerce_str(member.get("role_in_org")) or "member"
+            status_value = _coerce_str(member.get("status")) or "active"
+
+            user_result = await session.execute(select(User).where(User.phone == phone))
+            user = user_result.scalar_one_or_none()
+            if not user:
+                user = User(
+                    fio=fio,
+                    phone=phone,
+                    email=None,
+                    password_hash="!",
+                    address=None,
+                    work_time=None,
+                    is_24h=False,
+                    role="client",
+                )
+                session.add(user)
+                await session.flush()
+                users_created += 1
+            elif fio and fio != user.fio:
+                user.fio = fio
+
+            member_result = await session.execute(
+                select(OrgMember).where(OrgMember.org_id == org.id, OrgMember.user_id == user.id)
+            )
+            org_member = member_result.scalar_one_or_none()
+            if not org_member:
+                org_member = OrgMember(
+                    org_id=org.id,
+                    user_id=user.id,
+                    role_in_org=role_in_org,
+                    status=status_value,
+                )
+                session.add(org_member)
+            else:
+                org_member.role_in_org = role_in_org
+                org_member.status = status_value
+            members_upserted += 1
+
+    await session.flush()
+    return {
+        "ok": True,
+        "orgs_received": orgs_received,
+        "members_received": members_received,
+        "orgs_upserted": orgs_upserted,
+        "users_created": users_created,
+        "members_upserted": members_upserted,
+        "skipped": skipped,
+    }
+
+
 @router.post("/integrations/1c/catalog")
 @router.post("/onec/catalog")
 @router.post("/api/onec/catalog")
@@ -266,3 +374,21 @@ async def one_c_orders(
         if provided_token != settings.one_c_webhook_token:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return await process_orders_payload(session, payload)
+
+
+@router.post("/integrations/1c/orgs/members")
+@router.post("/onec/orgs/members")
+@router.post("/api/onec/orgs/members")
+async def one_c_org_members(
+    payload: Any = Body(...),
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    token_header: str | None = Header(default=None, alias="X-1C-Token"),
+    x_token_header: str | None = Header(default=None, alias="X-Token"),
+    token_query: str | None = Query(default=None, alias="token"),
+) -> dict[str, Any]:
+    if settings.one_c_webhook_token:
+        provided_token = _extract_token(authorization, token_header, x_token_header, token_query)
+        if provided_token != settings.one_c_webhook_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    return await process_members_payload(session, payload)

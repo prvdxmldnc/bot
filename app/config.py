@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://bot:bot@db:5432/bot"
     redis_url: str = "redis://redis:6379/0"
     admin_phone: str = "+89047678710"
+    admin_tg_id: int = 0
+    admin_tg_username: str = ""
     manager_phone: str = "+7999999999"
     secret_key: str = "change-me"
     openai_api_key: str = ""
@@ -18,6 +20,7 @@ class Settings(BaseSettings):
     gigachat_model: str = "GigaChat"
     gigachat_timeout_seconds: int = 20
     gigachat_token_cache_prefix: str = "gigachat:token"
+    gigachat_ca_bundle: str = ""
     one_c_enabled: bool = False
     one_c_base_url: str = ""
     one_c_username: str = ""

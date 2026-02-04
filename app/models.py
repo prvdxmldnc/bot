@@ -13,6 +13,7 @@ class Organization(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     members = relationship("OrgMember", back_populates="organization")
@@ -40,6 +41,9 @@ class User(Base):
 
 class OrgMember(Base):
     __tablename__ = "org_members"
+    __table_args__ = (
+        UniqueConstraint("org_id", "user_id", name="uq_org_members_org_user"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"))
