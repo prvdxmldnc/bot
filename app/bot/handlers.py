@@ -106,11 +106,22 @@ def _candidate_cache_key(tg_id: int, message_id: int) -> str:
     return f"candidates:{tg_id}:{message_id}"
 
 
-def _alias_keyboard(count: int) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"✅ Это позиция {idx}", callback_data=f"alias:{idx}")]
-        for idx in range(1, count + 1)
-    ]
+def _shorten_title(title: str, max_len: int = 50) -> str:
+    cleaned = " ".join((title or "").split())
+    if not cleaned:
+        return "Товар"
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[: max_len - 1].rstrip() + "…"
+
+
+def _alias_keyboard(titles: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, title in enumerate(titles, start=1):
+        short_title = _shorten_title(title)
+        rows.append(
+            [InlineKeyboardButton(text=f"✅ {idx}) {short_title}", callback_data=f"alias:{idx}")]
+        )
     rows.append([InlineKeyboardButton(text="❌ Не оно", callback_data="alias:no")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -829,10 +840,11 @@ async def handle_text_order(message: Message) -> None:
         lines = [f"{idx}. {c['title_ru']} (SKU: {c['sku']})" for idx, c in enumerate(candidates, start=1)]
         redis_client = _redis_client()
         reply_markup = None
-        if candidates and history_org_id and redis_client:
-            reply_markup = _alias_keyboard(len(candidates))
+        if len(candidates) > 1 and history_org_id and redis_client:
+            titles = [c.get("title_ru") or c.get("title") or "" for c in candidates]
+            reply_markup = _alias_keyboard(titles)
         sent = await message.answer("Вот что нашлось:\n" + "\n".join(lines), reply_markup=reply_markup)
-        if candidates and history_org_id and redis_client:
+        if len(candidates) > 1 and history_org_id and redis_client:
             cache_key = _candidate_cache_key(message.from_user.id, sent.message_id)
             payload = {
                 "org_id": history_org_id,
