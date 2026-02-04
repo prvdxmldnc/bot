@@ -41,6 +41,7 @@ from app.models import OrgMember, Order, Product, Thread, User
 from app.services.llm_gigachat import chat, get_access_token
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
+from app.services.llm_rerank import rerank_products
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
 from app.services.history_candidates import get_org_candidates
@@ -699,11 +700,45 @@ async def handle_text_order(message: Message) -> None:
             history_candidates_found=history_candidates_found,
         )
         logger.info("Search decision: %s", log_payload)
+        rerank_used = False
+        rerank_best_ids: list[int] = []
+        rerank_top_score: float | None = None
+        rerank_candidates = [
+            {
+                "product_id": candidate.get("id"),
+                "title": candidate.get("title_ru"),
+                "category": None,
+                "price": candidate.get("price"),
+                "stock": candidate.get("stock_qty"),
+            }
+            for candidate in candidates
+        ]
+        rerank_attrs = None
+        if handler_result.items:
+            rerank_attrs = handler_result.items[0].attributes
+        if len(rerank_candidates) >= 2:
+            rerank = await rerank_products(primary_query or fallback_query, rerank_candidates, rerank_attrs)
+            best = rerank.get("best") if isinstance(rerank, dict) else None
+            if isinstance(best, list) and best:
+                rerank_used = True
+                rerank_best_ids = [item.get("product_id") for item in best if isinstance(item, dict)]
+                rerank_best_ids = [pid for pid in rerank_best_ids if isinstance(pid, int)]
+                rerank_top_score = best[0].get("score") if isinstance(best[0], dict) else None
+                score_by_id = {item["product_id"]: item.get("score", 0.0) for item in best if "product_id" in item}
+                candidates.sort(
+                    key=lambda item: (
+                        score_by_id.get(item.get("id"), -1),
+                        item.get("score", 0),
+                    ),
+                    reverse=True,
+                )
+        log_payload = {
+            **log_payload,
+            "rerank_used": rerank_used,
+            "rerank_best_ids": rerank_best_ids,
+            "rerank_top_score": rerank_top_score,
+        }
         await _persist_search_log(session, user.id, message.text, log_payload, candidates)
-        if not candidates:
-            await message.answer("Ничего не найдено. Передали менеджеру для уточнения.")
-            await _notify_manager(message, user)
-            return
         lines = [f"{idx}. {c['title_ru']} (SKU: {c['sku']})" for idx, c in enumerate(candidates, start=1)]
         await message.answer("Вот что нашлось:\n" + "\n".join(lines))
         return
