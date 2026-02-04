@@ -1,12 +1,16 @@
+from datetime import datetime
 from typing import Any
 
 import hashlib
 import logging
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session
+from app.models import Organization, Product
+from app.services.history_candidates import upsert_org_product_stats
 from app.services.one_c import upsert_catalog
 
 router = APIRouter()
@@ -124,6 +128,91 @@ def _normalize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
     return normalized, skipped, sku_adjusted
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+async def process_orders_payload(session: AsyncSession, payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid payload")
+    org_name = _coerce_str(payload.get("org_name"))
+    if not org_name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="org_name is required")
+    result = await session.execute(select(Organization).where(Organization.name == org_name))
+    org = result.scalar_one_or_none()
+    if not org:
+        org = Organization(name=org_name, owner_user_id=None)
+        session.add(org)
+        await session.flush()
+
+    orders = payload.get("orders")
+    if not orders and isinstance(payload.get("items"), list):
+        orders = [{"ordered_at": None, "items": payload.get("items")}]
+    if not isinstance(orders, list):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="orders or items are required")
+
+    received_orders = len(orders)
+    received_items = 0
+    skipped = 0
+    items_mapped: list[dict[str, Any]] = []
+    for order in orders:
+        if not isinstance(order, dict):
+            continue
+        ordered_at = _parse_datetime(order.get("ordered_at"))
+        items = order.get("items") or []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            received_items += 1
+            sku = _coerce_str(item.get("sku"))
+            title = _coerce_str(item.get("title") or item.get("name"))
+            product = None
+            if sku:
+                product_result = await session.execute(select(Product).where(Product.sku == sku))
+                product = product_result.scalar_one_or_none()
+            if not product and title:
+                product_result = await session.execute(
+                    select(Product).where(Product.title_ru.ilike(f"%{title}%")).limit(1)
+                )
+                product = product_result.scalar_one_or_none()
+            if not product:
+                skipped += 1
+                continue
+            qty = _coerce_float(item.get("qty") or item.get("quantity"))
+            unit = _coerce_str(item.get("unit") or "") or None
+            items_mapped.append(
+                {
+                    "product_id": product.id,
+                    "qty": qty,
+                    "unit": unit,
+                    "ordered_at": ordered_at,
+                }
+            )
+
+    if items_mapped:
+        await upsert_org_product_stats(session, org.id, items_mapped)
+    return {
+        "ok": True,
+        "org_id": org.id,
+        "received_orders": received_orders,
+        "received_items": received_items,
+        "updated_rows": len(items_mapped),
+        "skipped": skipped,
+    }
+
+
 @router.post("/integrations/1c/catalog")
 @router.post("/onec/catalog")
 @router.post("/api/onec/catalog")
@@ -159,3 +248,21 @@ async def one_c_catalog(
         },
     )
     return {"ok": True, "received": len(raw_items), "upserted": updated, "skipped": skipped}
+
+
+@router.post("/integrations/1c/orders")
+@router.post("/onec/orders")
+@router.post("/api/onec/orders")
+async def one_c_orders(
+    payload: Any = Body(...),
+    session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    token_header: str | None = Header(default=None, alias="X-1C-Token"),
+    x_token_header: str | None = Header(default=None, alias="X-Token"),
+    token_query: str | None = Query(default=None, alias="token"),
+) -> dict[str, Any]:
+    if settings.one_c_webhook_token:
+        provided_token = _extract_token(authorization, token_header, x_token_header, token_query)
+        if provided_token != settings.one_c_webhook_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    return await process_orders_payload(session, payload)
