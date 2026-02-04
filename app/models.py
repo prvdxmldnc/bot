@@ -181,3 +181,22 @@ class OrgProductStats(Base):
     last_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OrgAlias(Base):
+    __tablename__ = "org_aliases"
+    __table_args__ = (
+        UniqueConstraint("org_id", "normalized_alias", "product_id", name="uq_org_aliases_org_alias_product"),
+        Index("ix_org_aliases_org_alias", "org_id", "normalized_alias"),
+        Index("ix_org_aliases_org_weight", "org_id", "weight", "last_used_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"))
+    alias_text: Mapped[str] = mapped_column(String(255))
+    normalized_alias: Mapped[str] = mapped_column(String(255))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
