@@ -151,6 +151,18 @@ curl -X POST http://localhost:8000/integrations/1c/catalog \\
 3. Если настроен `ONE_C_WEBHOOK_TOKEN`, добавьте токен любым из способов: `Authorization: Bearer`, `X-1C-Token`, `X-Token` или `?token=`.
 4. Для регулярной отправки заведите регламентное задание в 1С (например, каждые 10 минут).
 
+### HTTP push: история заказов (для history-first)
+
+Эндпоинты:
+
+```
+POST /integrations/1c/orders
+POST /onec/orders
+POST /api/onec/orders
+```
+
+Поддерживается `org_external_id` (GUID из 1С) — приоритетно используется для поиска организации, чтобы не плодить дубликаты. Если `org_external_id` нет, будет использован `org_name`.
+
 Настройки в `.env` для push:
 
 ```

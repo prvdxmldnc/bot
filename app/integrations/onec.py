@@ -146,15 +146,29 @@ async def process_orders_payload(session: AsyncSession, payload: Any) -> dict[st
     try:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid payload")
+        org_external_id = _coerce_str(payload.get("org_external_id"))
         org_name = _coerce_str(payload.get("org_name"))
-        if not org_name:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="org_name is required")
-        result = await session.execute(select(Organization).where(Organization.name == org_name))
-        org = result.scalar_one_or_none()
-        if not org:
-            org = Organization(name=org_name, owner_user_id=None)
-            session.add(org)
-            await session.flush()
+        org = None
+        if org_external_id:
+            result = await session.execute(select(Organization).where(Organization.external_id == org_external_id))
+            org = result.scalar_one_or_none()
+            if not org:
+                org = Organization(name=org_name or org_external_id, external_id=org_external_id, owner_user_id=None)
+                session.add(org)
+                await session.flush()
+            elif org_name and org.name != org_name:
+                org.name = org_name
+        else:
+            if not org_name:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="org_name or org_external_id is required"
+                )
+            result = await session.execute(select(Organization).where(Organization.name == org_name))
+            org = result.scalar_one_or_none()
+            if not org:
+                org = Organization(name=org_name, owner_user_id=None)
+                session.add(org)
+                await session.flush()
 
         orders = payload.get("orders")
         if not orders and isinstance(payload.get("items"), list):

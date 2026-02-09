@@ -74,3 +74,34 @@ def test_process_orders_payload_skips_unknown_items():
     assert result["skipped"] == 2
     assert session.query(OrgProductStats).count() == 0
     assert session.query(Organization).count() == 1
+
+
+def test_process_orders_payload_uses_external_id():
+    session = _make_session()
+    product = Product(sku="SKU-2", title_ru="Item 2")
+    session.add(product)
+    session.flush()
+    async_session = AsyncSessionWrapper(session)
+
+    payload = {
+        "org_external_id": "x-1",
+        "org_name": "ORG A",
+        "items": [{"sku": "SKU-2", "qty": 1}],
+    }
+    result = asyncio.run(process_orders_payload(async_session, payload))
+    session.commit()
+
+    assert result["org_id"] is not None
+    org = session.query(Organization).one()
+    assert org.external_id == "x-1"
+
+    payload_second = {
+        "org_external_id": "x-1",
+        "org_name": "ORG B",
+        "items": [{"sku": "SKU-2", "qty": 2}],
+    }
+    result_second = asyncio.run(process_orders_payload(async_session, payload_second))
+    session.commit()
+
+    assert result_second["org_id"] == org.id
+    assert session.query(Organization).count() == 1
