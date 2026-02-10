@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.services.llm_gigachat import chat
+from app.services.llm_client import chat
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ async def rerank_products(
     )
 
     try:
-        data = await chat(
+        content = await chat(
             messages=[
                 {"role": "system", "content": "Ты помощник по подбору товаров."},
                 {"role": "user", "content": prompt},
@@ -109,7 +109,6 @@ async def rerank_products(
         logger.exception("LLM rerank failed")
         return {"best": [], "need_clarify": []}
 
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     parsed = _parse_rerank_content(content)
     best_ids = [item["product_id"] for item in parsed.get("best", []) if "product_id" in item]
     if best_ids:

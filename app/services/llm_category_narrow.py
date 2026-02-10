@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from app.services.category_manifest import get_category_manifest
-from app.services.llm_gigachat import chat
+from app.services.llm_client import chat
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ async def narrow_categories(user_text: str, session) -> dict[str, Any]:
         "Ответь строго JSON: {\"category_ids\":[1,2],\"confidence\":0.0,\"reason\":\"...\"}."
     )
     try:
-        response = await chat(
+        content = await chat(
             [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": json.dumps({"query": narrowed_query, "categories": context_items})},
@@ -86,7 +86,6 @@ async def narrow_categories(user_text: str, session) -> dict[str, Any]:
     except Exception:
         logger.exception("LLM category narrow failed")
         return {"category_ids": [], "confidence": 0.0, "reason": "llm_failed"}
-    content = response["choices"][0]["message"]["content"]
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
