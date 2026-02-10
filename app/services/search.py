@@ -26,6 +26,7 @@ _STOP_WORDS = {
     "коробка",
     "коробочки",
     "рулон",
+    "рулонная",
     "рул",
     "уп",
     "упак",
@@ -36,6 +37,8 @@ _STOP_WORDS = {
     "мм",
     "см",
     "цвет",
+    "тип",
+    "№",
     "дешевый",
     "дешевая",
     "дешевые",
@@ -50,10 +53,8 @@ _COLOR_STEM_MAP = {
     "черн": "черн",
     "син": "син",
     "зел": "зел",
-    "красн": "красн",
 }
 _COLOR_STEM_TOKENS = set(_COLOR_STEM_MAP.values())
-
 
 def _normalize_query(text: str) -> str:
     normalized = text.lower()
@@ -107,7 +108,7 @@ def _extract_tokens(text: str) -> list[str]:
 def _token_matches_title(token: str, title: str, title_words: list[str]) -> bool:
     if len(token) <= 3:
         return any(word.startswith(token) for word in title_words)
-    return token in title
+    return any(token in word for word in title_words) or token in title
 
 
 def _score_product(product: Product, query: str, numbers: list[int]) -> float:
@@ -174,7 +175,16 @@ async def search_products(
 
     tokens_to_check = tokens
     if numbers:
-        tokens_to_check = [token for token in tokens if len(token) >= 4 or token in _COLOR_STEM_TOKENS]
+        tokens_to_check = []
+        for raw_token in q.split():
+            raw_token = raw_token.strip()
+            if not raw_token or raw_token.isdigit():
+                continue
+            if raw_token in _STOP_WORDS:
+                continue
+            token = _COLOR_STEM_MAP.get(raw_token, raw_token)
+            if len(token) >= 4 or raw_token in _COLOR_STEM_MAP:
+                tokens_to_check.append(token)
 
     if tokens_to_check:
         filtered_products = []
