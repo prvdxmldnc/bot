@@ -3,19 +3,28 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import OrgProductStats
 
 
-async def get_org_candidates(session: AsyncSession, org_id: int, limit: int = 200) -> list[int]:
+async def count_org_candidates(session: AsyncSession, org_id: int) -> int:
     result = await session.execute(
+        select(func.count()).select_from(OrgProductStats).where(OrgProductStats.org_id == org_id)
+    )
+    return int(result.scalar() or 0)
+
+
+async def get_org_candidates(session: AsyncSession, org_id: int, limit: int | None = 200) -> list[int]:
+    query = (
         select(OrgProductStats.product_id)
         .where(OrgProductStats.org_id == org_id)
         .order_by(desc(OrgProductStats.orders_count), desc(OrgProductStats.last_order_at))
-        .limit(limit)
     )
+    if limit is not None:
+        query = query.limit(limit)
+    result = await session.execute(query)
     return [row[0] for row in result.all()]
 
 

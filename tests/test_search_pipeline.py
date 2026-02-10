@@ -15,6 +15,10 @@ class DummySession:
         return DummyResult()
 
 
+async def _count_zero(*args, **kwargs):
+    return 0
+
+
 def test_history_first_uses_product_ids(monkeypatch):
     async def fake_search_products(session, query, limit=5, category_ids=None, product_ids=None):
         assert product_ids == [1, 2]
@@ -26,9 +30,13 @@ def test_history_first_uses_product_ids(monkeypatch):
     async def fake_get_org_candidates(*args, **kwargs):
         return [1, 2]
 
+    async def fake_count(*args, **kwargs):
+        return 2
+
     monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
     monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", fake_count)
     monkeypatch.setattr(search_pipeline, "parse_order_text", lambda query: [{"query": query, "raw": query}])
 
     handler_result = types.SimpleNamespace(items=[types.SimpleNamespace(normalized="болт 8 30", attributes=None)])
@@ -56,6 +64,7 @@ def test_alias_stage_sets_alias_used(monkeypatch):
     monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
     monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
     monkeypatch.setattr(search_pipeline, "parse_order_text", lambda query: [{"query": query, "raw": query}])
 
     handler_result = types.SimpleNamespace(items=[types.SimpleNamespace(normalized="поролон 10мм", attributes=None)])
@@ -81,6 +90,7 @@ def test_llm_disabled_sets_reason(monkeypatch):
     monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
     monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
     monkeypatch.setattr(search_pipeline, "parse_order_text", lambda query: [{"query": query, "raw": query}])
 
     handler_result = types.SimpleNamespace(items=[])
@@ -111,6 +121,7 @@ def test_pipeline_uses_clean_query_without_qty_units(monkeypatch):
     monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
     monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
     monkeypatch.setattr(
         search_pipeline,
         "parse_order_text",
@@ -142,12 +153,13 @@ def test_pipeline_uses_clean_query_for_zipper_qty_input(monkeypatch):
         captured["alias_query"] = query
         return [2]
 
-    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
-    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     async def fake_get_org_candidates(*args, **kwargs):
         return []
 
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
     monkeypatch.setattr(
         search_pipeline,
         "parse_order_text",
@@ -179,6 +191,7 @@ def test_pipeline_returns_trace_with_clean_query(monkeypatch):
     monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
     monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
     monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
     monkeypatch.setattr(
         search_pipeline,
         "parse_order_text",
@@ -200,3 +213,78 @@ def test_pipeline_returns_trace_with_clean_query(monkeypatch):
     assert history_stage["name"] == "history"
     assert alias_stage["name"] == "alias"
     assert alias_stage["query_used"] == "мел белый"
+
+
+def test_history_adaptive_widening_uses_2000(monkeypatch):
+    calls: list[int | None] = []
+
+    async def fake_find_alias(*args, **kwargs):
+        return []
+
+    async def fake_count_org_candidates(*args, **kwargs):
+        return 2500
+
+    async def fake_get_org_candidates(_session, _org_id, limit=200):
+        calls.append(limit)
+        if limit == 200:
+            return [1]
+        if limit == 2000:
+            return [999]
+        return []
+
+    async def fake_search_products(_session, query, limit=5, category_ids=None, product_ids=None):
+        if product_ids == [999]:
+            return [{"id": 999, "title_ru": "Синтепон Pro 60 гр/м", "sku": "ST-60"}]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", fake_count_org_candidates)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q}])
+    handler_result = types.SimpleNamespace(items=[types.SimpleNamespace(normalized="синтепон 60", attributes=None)])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: handler_result)
+    monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+
+    payload = asyncio.run(
+        search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="синтепон 60")
+    )
+
+    assert payload["results"]
+    assert calls[:2] == [200, 2000]
+    history_stage = payload["trace"]["stages"][0]
+    assert history_stage["history_total_available"] == 2500
+    assert history_stage["limit_used"] == 2000
+    assert history_stage["history_used"] is True
+    assert history_stage["attempts"][0]["limit"] == 200
+    assert history_stage["attempts"][0]["found_results"] == 0
+    assert history_stage["attempts"][1]["limit"] == 2000
+    assert history_stage["attempts"][1]["found_results"] > 0
+
+
+def test_history_adaptive_widening_skips_all_when_over_3000(monkeypatch):
+    calls: list[int | None] = []
+
+    async def fake_find_alias(*args, **kwargs):
+        return []
+
+    async def fake_count_org_candidates(*args, **kwargs):
+        return 5000
+
+    async def fake_get_org_candidates(_session, _org_id, limit=200):
+        calls.append(limit)
+        return []
+
+    async def fake_search_products(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", fake_count_org_candidates)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+
+    asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="синтепон 60"))
+    assert calls == [200, 2000]

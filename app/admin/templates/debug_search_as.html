@@ -90,6 +90,20 @@
             <li>candidates_before: {{ stage.candidates_before }}</li>
             <li>candidates_after: {{ stage.candidates_after }}</li>
             <li>top5_titles: {{ stage.top5_titles }}</li>
+            {% if stage.attempts %}
+              <li>history_total_available: {{ stage.history_total_available }}</li>
+              <li>limit_used: {{ stage.limit_used }}</li>
+              <li>history_used: {{ stage.history_used }}</li>
+              <li>top_titles: {{ stage.top_titles }}</li>
+              <li>
+                attempts:
+                <ul>
+                  {% for a in stage.attempts %}
+                    <li>limit={{ a.limit }}, candidates_count={{ a.candidates_count }}, found_results={{ a.found_results }}, note={{ a.note }}</li>
+                  {% endfor %}
+                </ul>
+              </li>
+            {% endif %}
           </ul>
         </details>
       {% endif %}
