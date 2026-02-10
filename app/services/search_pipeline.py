@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -16,9 +17,37 @@ from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
 from app.services.order_parser import parse_order_text
 from app.services.org_aliases import find_org_alias_candidates
-from app.services.search import search_products
+from app.services.search import normalize_query_text, search_products
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_RE = re.compile(r"[a-zа-я0-9]+", re.IGNORECASE)
+_STOP_WORDS = {
+    "шт",
+    "штук",
+    "кор",
+    "короб",
+    "коробка",
+    "коробочки",
+    "рул",
+    "рулон",
+    "рулонная",
+    "уп",
+    "упак",
+    "упаковка",
+    "мм",
+    "см",
+    "м",
+    "м2",
+    "кг",
+    "гр",
+    "г",
+    "тип",
+    "номер",
+    "цвет",
+    "no",
+    "n",
+}
 
 
 def _fallback_query(parsed_items: list[dict[str, Any]]) -> str:
@@ -43,6 +72,51 @@ def _clean_search_query(parsed_items: list[dict[str, Any]], handler_result) -> s
     if primary:
         return primary
     return _fallback_query(parsed_items).strip()
+
+
+def _extract_trace_tokens_numbers(query: str) -> tuple[list[str], list[int]]:
+    normalized = normalize_query_text(query)
+    tokens: list[str] = []
+    numbers: list[int] = []
+    for token in _TOKEN_RE.findall(normalized):
+        if token.isdigit():
+            numbers.append(int(token))
+            continue
+        if token in _STOP_WORDS:
+            continue
+        tokens.append(token)
+    return tokens, numbers
+
+
+def _stage_entry(
+    *,
+    name: str,
+    query_used: str,
+    tokens_used: list[str],
+    numbers_used: list[int],
+    candidates_before: int,
+    candidates_after: int,
+    notes: str,
+    product_ids_filter_count: int | None = None,
+    category_ids_filter: list[int] | None = None,
+    top_candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "query_used": query_used,
+        "tokens_used": tokens_used,
+        "numbers_used": numbers_used,
+        "product_ids_filter_count": product_ids_filter_count,
+        "category_ids_filter": category_ids_filter or [],
+        "candidates_before": candidates_before,
+        "candidates_after": candidates_after,
+        "top5_titles": [
+            str(item.get("title_ru") or "")
+            for item in (top_candidates or [])[:5]
+            if item.get("title_ru")
+        ],
+        "notes": notes,
+    }
 
 
 async def _resolve_org_id(session: AsyncSession, user_id: int | None, org_id: int | None) -> int | None:
@@ -121,6 +195,8 @@ async def run_search_pipeline(
     fallback_query = _fallback_query(parsed_items)
     primary_query = _primary_query(handler_result) or fallback_query
     search_query = _clean_search_query(parsed_items, handler_result) or fallback_query
+    normalized_text = normalize_query_text(search_query or text)
+    trace_tokens, trace_numbers = _extract_trace_tokens_numbers(search_query or text)
     history_org_id = await _resolve_org_id(session, user_id, org_id)
 
     history_candidates_count = 0
@@ -133,6 +209,11 @@ async def run_search_pipeline(
     alias_candidates_found = 0
 
     candidates: list[dict[str, Any]] = []
+    trace_by_name: dict[str, dict[str, Any]] = {}
+
+    alias_before = len(candidates)
+    alias_product_ids: list[int] = []
+    alias_note = "skipped: org_id unresolved"
     if history_org_id:
         alias_product_ids = await find_org_alias_candidates(session, history_org_id, search_query, limit=5)
         alias_candidates_count = len(alias_product_ids)
@@ -142,7 +223,26 @@ async def run_search_pipeline(
                 alias_used = True
                 alias_query_used = search_query
                 alias_candidates_found = len(candidates)
+                alias_note = "alias product_ids matched"
+            else:
+                alias_note = "alias product_ids найден, но search_products вернул 0"
+        else:
+            alias_note = "alias candidates not found"
+    trace_by_name["alias"] = _stage_entry(
+        name="alias",
+        query_used=search_query,
+        tokens_used=trace_tokens,
+        numbers_used=trace_numbers,
+        product_ids_filter_count=len(alias_product_ids),
+        candidates_before=alias_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=alias_note,
+    )
 
+    history_before = len(candidates)
+    history_candidate_ids: list[int] = []
+    history_note = "skipped: already have candidates"
     if history_org_id and not candidates:
         history_candidate_ids = await get_org_candidates(session, history_org_id, limit=200)
         history_candidates_count = len(history_candidate_ids)
@@ -152,9 +252,42 @@ async def run_search_pipeline(
                 history_used = True
                 history_query_used = search_query
                 history_candidates_found = len(candidates)
+                history_note = "history product_ids matched"
+            else:
+                history_note = "history product_ids найден, но search_products вернул 0"
+        else:
+            history_note = "history candidates not found"
+    elif not history_org_id:
+        history_note = "skipped: org_id unresolved"
+    trace_by_name["history"] = _stage_entry(
+        name="history",
+        query_used=search_query,
+        tokens_used=trace_tokens,
+        numbers_used=trace_numbers,
+        product_ids_filter_count=len(history_candidate_ids),
+        candidates_before=history_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=history_note,
+    )
 
+    local_before = len(candidates)
+    local_note = "skipped: already have candidates"
     if parsed_items and not candidates:
         candidates = await search_products(session, search_query, limit=limit)
+        local_note = "local search matched" if candidates else "local search returned 0"
+    elif not parsed_items:
+        local_note = "skipped: parse_order_text returned empty"
+    trace_by_name["local"] = _stage_entry(
+        name="local",
+        query_used=search_query,
+        tokens_used=trace_tokens,
+        numbers_used=trace_numbers,
+        candidates_before=local_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=local_note,
+    )
 
     candidates_count = len(candidates)
     decision = (
@@ -170,6 +303,9 @@ async def run_search_pipeline(
     llm_narrow_reason: str | None = None
     narrowed_query: str | None = None
 
+    llm_before = len(candidates)
+    llm_note = "skipped: already have candidates"
+    llm_query_used = search_query
     if not candidates and parsed_items and settings.gigachat_basic_auth_key:
         alternatives = await suggest_queries(search_query or text)
         for alternative in alternatives:
@@ -179,6 +315,8 @@ async def run_search_pipeline(
                 candidates_count = len(candidates)
                 decision = "llm_ok"
                 used_alternative = alternative
+                llm_query_used = alternative
+                llm_note = "llm alternative matched"
                 break
         if not candidates:
             narrowed_query = search_query or text
@@ -197,6 +335,7 @@ async def run_search_pipeline(
                     candidates = retry_candidates
                     candidates_count = len(candidates)
                     decision = "llm_narrow_ok"
+                    llm_note = "llm narrow categories matched"
                 else:
                     for alternative in alternatives:
                         retry_candidates = await search_products(
@@ -210,18 +349,36 @@ async def run_search_pipeline(
                             candidates_count = len(candidates)
                             decision = "llm_narrow_ok"
                             used_alternative = alternative
+                            llm_query_used = alternative
+                            llm_note = "llm narrow + alternative matched"
                             break
                     if not candidates:
                         decision = "needs_manager"
+                        llm_note = "llm narrow categories returned 0"
             else:
                 decision = "needs_manager"
+                llm_note = "llm narrow returned empty categories"
     elif not candidates:
         decision = "needs_manager"
         llm_narrow_reason = "llm_disabled"
+        llm_note = "skipped: llm disabled"
+    trace_by_name["llm_narrow"] = _stage_entry(
+        name="llm_narrow",
+        query_used=llm_query_used,
+        tokens_used=_extract_trace_tokens_numbers(llm_query_used)[0],
+        numbers_used=_extract_trace_tokens_numbers(llm_query_used)[1],
+        category_ids_filter=category_ids,
+        candidates_before=llm_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=llm_note,
+    )
 
     rerank_used = False
     rerank_best_ids: list[int] = []
     rerank_top_score: float | None = None
+    rerank_before = len(candidates)
+    rerank_note = "skipped: less than 2 candidates or llm disabled"
     if len(candidates) >= 2 and settings.gigachat_basic_auth_key:
         rerank_payload = [
             {
@@ -249,6 +406,19 @@ async def run_search_pipeline(
                 ),
                 reverse=True,
             )
+            rerank_note = "rerank applied"
+        else:
+            rerank_note = "rerank returned empty best list"
+    trace_by_name["rerank"] = _stage_entry(
+        name="rerank",
+        query_used=search_query,
+        tokens_used=trace_tokens,
+        numbers_used=trace_numbers,
+        candidates_before=rerank_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=rerank_note,
+    )
 
     decision_payload = _decision_payload(
         parsed_items=parsed_items,
@@ -289,6 +459,22 @@ async def run_search_pipeline(
         alias_used,
         history_used,
     )
+    trace = {
+        "input": {
+            "raw_text": text,
+            "normalized_text": normalized_text,
+            "parsed_items": parsed_items,
+            "org_id": history_org_id,
+            "user_id": user_id,
+        },
+        "stages": [
+            trace_by_name.get("history"),
+            trace_by_name.get("alias"),
+            trace_by_name.get("local"),
+            trace_by_name.get("llm_narrow"),
+            trace_by_name.get("rerank"),
+        ],
+    }
     return {
         "results": candidates,
         "decision": {
@@ -297,4 +483,5 @@ async def run_search_pipeline(
             "rerank_best_ids": rerank_best_ids,
             "rerank_top_score": rerank_top_score,
         },
+        "trace": trace,
     }

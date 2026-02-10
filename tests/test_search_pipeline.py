@@ -164,3 +164,39 @@ def test_pipeline_uses_clean_query_for_zipper_qty_input(monkeypatch):
     assert payload["results"]
     assert captured["alias_query"] == "молния беж"
     assert captured["search_query"] == "молния беж"
+
+
+def test_pipeline_returns_trace_with_clean_query(monkeypatch):
+    async def fake_search_products(session, query, limit=5, category_ids=None, product_ids=None):
+        return [{"id": 10, "title_ru": "Карандаш меловой белый", "sku": "CH-10"}]
+
+    async def fake_find_alias(*args, **kwargs):
+        return [10]
+
+    async def fake_get_org_candidates(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(
+        search_pipeline,
+        "parse_order_text",
+        lambda _query: [{"query": "мел белый", "raw": "мел белый 2 коробочки"}],
+    )
+    handler_result = types.SimpleNamespace(items=[types.SimpleNamespace(normalized="мел белый 2 коробочки", attributes=None)])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: handler_result)
+    monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+
+    payload = asyncio.run(
+        search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=7, text="мел белый 2 коробочки")
+    )
+
+    assert "trace" in payload
+    assert payload["trace"]["stages"]
+    assert payload["trace"]["input"]["normalized_text"] == "мел белый"
+    history_stage = payload["trace"]["stages"][0]
+    alias_stage = payload["trace"]["stages"][1]
+    assert history_stage["name"] == "history"
+    assert alias_stage["name"] == "alias"
+    assert alias_stage["query_used"] == "мел белый"

@@ -71,6 +71,31 @@
     </ul>
   {% endif %}
 
+  {% if trace %}
+    <h3>Trace</h3>
+    <details open>
+      <summary>Input</summary>
+      <pre>{{ trace.input | tojson(indent=2) }}</pre>
+    </details>
+    {% for stage in trace.stages %}
+      {% if stage %}
+        <details>
+          <summary>{{ stage.name }} — {{ stage.notes }}</summary>
+          <ul>
+            <li>query_used: <code>{{ stage.query_used }}</code></li>
+            <li>tokens_used: {{ stage.tokens_used }}</li>
+            <li>numbers_used: {{ stage.numbers_used }}</li>
+            <li>product_ids_filter_count: {{ stage.product_ids_filter_count if stage.product_ids_filter_count is not none else "" }}</li>
+            <li>category_ids_filter: {{ stage.category_ids_filter }}</li>
+            <li>candidates_before: {{ stage.candidates_before }}</li>
+            <li>candidates_after: {{ stage.candidates_after }}</li>
+            <li>top5_titles: {{ stage.top5_titles }}</li>
+          </ul>
+        </details>
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+
   {% if batch_results %}
     <h2>Batch результаты</h2>
     <table border="1" cellpadding="6">
@@ -87,6 +112,16 @@
           <td>{{ entry.decision.candidates_count_final }}</td>
           <td>{{ entry.results[0].title_ru if entry.results else "" }}</td>
         </tr>
+        {% if entry.trace %}
+          <tr>
+            <td colspan="4">
+              <details>
+                <summary>Trace: {{ entry.query }}</summary>
+                <pre>{{ entry.trace | tojson(indent=2) }}</pre>
+              </details>
+            </td>
+          </tr>
+        {% endif %}
       {% endfor %}
     </table>
   {% endif %}
