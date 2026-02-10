@@ -34,6 +34,17 @@ def _primary_query(handler_result) -> str:
     return ""
 
 
+def _clean_search_query(parsed_items: list[dict[str, Any]], handler_result) -> str:
+    if parsed_items:
+        parsed_query = (parsed_items[0].get("query") or "").strip()
+        if parsed_query:
+            return parsed_query
+    primary = (_primary_query(handler_result) or "").strip()
+    if primary:
+        return primary
+    return _fallback_query(parsed_items).strip()
+
+
 async def _resolve_org_id(session: AsyncSession, user_id: int | None, org_id: int | None) -> int | None:
     if org_id:
         return org_id
@@ -109,6 +120,7 @@ async def run_search_pipeline(
     handler_result = handle_message(text, DialogContext(last_state=None, last_items=[], topic="unknown"))
     fallback_query = _fallback_query(parsed_items)
     primary_query = _primary_query(handler_result) or fallback_query
+    search_query = _clean_search_query(parsed_items, handler_result) or fallback_query
     history_org_id = await _resolve_org_id(session, user_id, org_id)
 
     history_candidates_count = 0
@@ -122,27 +134,27 @@ async def run_search_pipeline(
 
     candidates: list[dict[str, Any]] = []
     if history_org_id:
-        alias_product_ids = await find_org_alias_candidates(session, history_org_id, text, limit=5)
+        alias_product_ids = await find_org_alias_candidates(session, history_org_id, search_query, limit=5)
         alias_candidates_count = len(alias_product_ids)
         if alias_product_ids:
-            candidates = await search_products(session, primary_query, limit=limit, product_ids=alias_product_ids)
+            candidates = await search_products(session, search_query, limit=limit, product_ids=alias_product_ids)
             if candidates:
                 alias_used = True
-                alias_query_used = primary_query
+                alias_query_used = search_query
                 alias_candidates_found = len(candidates)
 
     if history_org_id and not candidates:
         history_candidate_ids = await get_org_candidates(session, history_org_id, limit=200)
         history_candidates_count = len(history_candidate_ids)
         if history_candidate_ids:
-            candidates = await search_products(session, primary_query, limit=limit, product_ids=history_candidate_ids)
+            candidates = await search_products(session, search_query, limit=limit, product_ids=history_candidate_ids)
             if candidates:
                 history_used = True
-                history_query_used = primary_query
+                history_query_used = search_query
                 history_candidates_found = len(candidates)
 
     if parsed_items and not candidates:
-        candidates = await search_products(session, fallback_query, limit=limit)
+        candidates = await search_products(session, search_query, limit=limit)
 
     candidates_count = len(candidates)
     decision = (
@@ -159,7 +171,7 @@ async def run_search_pipeline(
     narrowed_query: str | None = None
 
     if not candidates and parsed_items and settings.gigachat_basic_auth_key:
-        alternatives = await suggest_queries(primary_query or text)
+        alternatives = await suggest_queries(search_query or text)
         for alternative in alternatives:
             retry_candidates = await search_products(session, alternative, limit=limit)
             if retry_candidates:
@@ -169,7 +181,7 @@ async def run_search_pipeline(
                 used_alternative = alternative
                 break
         if not candidates:
-            narrowed_query = primary_query or fallback_query or text
+            narrowed_query = search_query or text
             narrow_result = await narrow_categories(narrowed_query, session)
             category_ids = narrow_result.get("category_ids", [])
             llm_narrow_confidence = narrow_result.get("confidence")
@@ -177,7 +189,7 @@ async def run_search_pipeline(
             if category_ids:
                 retry_candidates = await search_products(
                     session,
-                    primary_query or fallback_query or text,
+                    search_query or text,
                     limit=limit,
                     category_ids=category_ids,
                 )
@@ -222,7 +234,7 @@ async def run_search_pipeline(
             for candidate in candidates
         ]
         attrs = handler_result.items[0].attributes if handler_result.items else None
-        rerank = await rerank_products(primary_query or fallback_query or text, rerank_payload, attrs)
+        rerank = await rerank_products(search_query or text, rerank_payload, attrs)
         best = rerank.get("best") if isinstance(rerank, dict) else None
         if isinstance(best, list) and best:
             rerank_used = True
@@ -240,7 +252,7 @@ async def run_search_pipeline(
 
     decision_payload = _decision_payload(
         parsed_items=parsed_items,
-        original_query=primary_query or fallback_query or text,
+        original_query=search_query or text,
         alternatives=alternatives,
         used_alternative=used_alternative,
         candidates_count_final=len(candidates),

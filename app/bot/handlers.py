@@ -651,7 +651,8 @@ async def handle_text_order(message: Message) -> None:
         item = parsed_items[0] if parsed_items else {}
         fallback_query = item.get("query") or item.get("raw") or ""
         primary_query = handler_result.items[0].normalized if handler_result.items else fallback_query
-        query = fallback_query
+        search_query = (item.get("query") or "").strip() or (primary_query or "").strip() or fallback_query
+        query = search_query
         history_org_id: int | None = None
         history_candidates_count = 0
         history_used = False
@@ -669,18 +670,18 @@ async def handle_text_order(message: Message) -> None:
             membership = result.scalars().first()
             history_org_id = membership.org_id if membership else None
             if history_org_id:
-                alias_product_ids = await find_org_alias_candidates(session, history_org_id, message.text, limit=5)
+                alias_product_ids = await find_org_alias_candidates(session, history_org_id, search_query, limit=5)
                 alias_candidates_count = len(alias_product_ids)
                 if alias_product_ids:
                     candidates = await search_products(
                         session,
-                        primary_query,
+                        search_query,
                         limit=5,
                         product_ids=alias_product_ids,
                     )
                     if candidates:
                         alias_used = True
-                        alias_query_used = primary_query
+                        alias_query_used = search_query
                         alias_candidates_found = len(candidates)
             if history_org_id and not candidates:
                 history_candidate_ids = await get_org_candidates(session, history_org_id, limit=200)
@@ -688,16 +689,16 @@ async def handle_text_order(message: Message) -> None:
                 if history_candidate_ids:
                     candidates = await search_products(
                         session,
-                        primary_query,
+                        search_query,
                         limit=5,
                         product_ids=history_candidate_ids,
                     )
                     if candidates:
                         history_used = True
-                        history_query_used = primary_query
+                        history_query_used = search_query
                         history_candidates_found = len(candidates)
         if parsed_items and not candidates:
-            candidates = await search_products(session, fallback_query, limit=5)
+            candidates = await search_products(session, search_query, limit=5)
         candidates_count = len(candidates)
         decision = (
             "alias_ok"
@@ -728,7 +729,7 @@ async def handle_text_order(message: Message) -> None:
         llm_narrow_reason: str | None = None
         narrowed_query: str | None = None
         if not candidates:
-            alternatives = await suggest_queries(query or message.text)
+            alternatives = await suggest_queries(search_query or message.text)
             for alternative in alternatives:
                 retry_candidates = await search_products(session, alternative, limit=5)
                 if retry_candidates:
@@ -738,11 +739,7 @@ async def handle_text_order(message: Message) -> None:
                     used_alternative = alternative
                     break
             if not candidates:
-                narrowed_query = (
-                    handler_result.items[0].normalized
-                    if handler_result.items
-                    else (fallback_query or message.text)
-                )
+                narrowed_query = search_query or message.text
                 narrow_result = await narrow_categories(narrowed_query, session)
                 category_ids = narrow_result.get("category_ids", [])
                 llm_narrow_confidence = narrow_result.get("confidence")
@@ -750,7 +747,7 @@ async def handle_text_order(message: Message) -> None:
                 if category_ids:
                     retry_candidates = await search_products(
                         session,
-                        query,
+                        search_query,
                         limit=5,
                         category_ids=category_ids,
                     )
@@ -815,7 +812,7 @@ async def handle_text_order(message: Message) -> None:
         if handler_result.items:
             rerank_attrs = handler_result.items[0].attributes
         if len(rerank_candidates) >= 2:
-            rerank = await rerank_products(primary_query or fallback_query, rerank_candidates, rerank_attrs)
+            rerank = await rerank_products(search_query or fallback_query, rerank_candidates, rerank_attrs)
             best = rerank.get("best") if isinstance(rerank, dict) else None
             if isinstance(best, list) and best:
                 rerank_used = True
@@ -844,9 +841,7 @@ async def handle_text_order(message: Message) -> None:
             if len(candidates) == 1 or (rerank_top_score is not None and rerank_top_score >= 0.85):
                 autolearn_attempted = True
                 alias_text = (
-                    handler_result.items[0].normalized
-                    if handler_result.items
-                    else (narrowed_query or primary_query or fallback_query or message.text)
+                    narrowed_query or search_query or message.text
                 )
                 product_id = candidates[0].get("id")
                 if isinstance(product_id, int):
