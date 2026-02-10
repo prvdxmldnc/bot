@@ -18,6 +18,31 @@ logger = logging.getLogger(__name__)
 _SIZE_RE = re.compile(r"(\d+)\s*[xх*]\s*(\d+)")
 _SIZE_SEPARATOR_RE = re.compile(r"(\d)\s*[xх*]\s*(\d)", re.IGNORECASE)
 _SIZE_NA_RE = re.compile(r"(\d)\s+на\s+(\d)", re.IGNORECASE)
+_STOP_WORDS = {
+    "шт",
+    "штук",
+    "кор",
+    "короб",
+    "коробка",
+    "коробочки",
+    "рулон",
+    "рул",
+    "уп",
+    "упак",
+    "упаковка",
+    "кг",
+    "г",
+    "м",
+    "мм",
+    "см",
+    "цвет",
+    "дешевый",
+    "дешевая",
+    "дешевые",
+    "недорогой",
+    "недорогая",
+    "наличие",
+}
 
 
 def _normalize_query(text: str) -> str:
@@ -50,6 +75,19 @@ def _extract_numbers(text: str) -> list[int]:
     return numbers
 
 
+def _extract_tokens(text: str) -> list[str]:
+    tokens = []
+    for token in text.split():
+        if len(token) < 3:
+            continue
+        if token in _STOP_WORDS:
+            continue
+        if token.isdigit():
+            continue
+        tokens.append(token)
+    return tokens
+
+
 def _score_product(product: Product, query: str, numbers: list[int]) -> float:
     score = 0.0
     q = query.lower()
@@ -75,6 +113,7 @@ async def search_products(
     original = query.strip().lower()
     q = _normalize_query(query)
     numbers = _extract_numbers(q)
+    tokens = _extract_tokens(q)
     base = select(Product)
     if category_ids:
         base = base.where(Product.category_id.in_(category_ids))
@@ -86,7 +125,12 @@ async def search_products(
             filters.append(Product.title_ru.ilike(f"%{num}%"))
         base = base.where(and_(*filters))
     else:
-        base = base.where(Product.title_ru.ilike(f"%{q}%"))
+        if len(tokens) >= 2:
+            base = base.where(and_(*[Product.title_ru.ilike(f"%{token}%") for token in tokens]))
+        elif len(tokens) == 1:
+            base = base.where(Product.title_ru.ilike(f"%{tokens[0]}%"))
+        else:
+            base = base.where(Product.title_ru.ilike(f"%{q}%"))
     result = await session.execute(base.limit(100))
     products = list(result.scalars().all())
     if not products and len(numbers) >= 3:
@@ -99,10 +143,18 @@ async def search_products(
         fallback_query = select(Product).where(and_(*fallback_filters)).limit(100)
         fallback_result = await session.execute(fallback_query)
         products = list(fallback_result.scalars().all())
-    if q:
-        for word in q.split():
-            if not word.isdigit() and len(word) > 1:
-                products = [p for p in products if word in (p.title_ru or "").lower()]
+    if numbers:
+        products = [
+            product
+            for product in products
+            if all(str(num) in (product.title_ru or "").lower() for num in numbers)
+        ]
+    if tokens:
+        products = [
+            product
+            for product in products
+            if all(token in (product.title_ru or "").lower() for token in tokens)
+        ]
     scored = []
     for product in products:
         score = _score_product(product, q, numbers)
