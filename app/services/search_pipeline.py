@@ -11,7 +11,7 @@ from app.config import settings
 from app.models import OrgMember, Product
 from app.request_handler import handle_message
 from app.request_handler.types import DialogContext
-from app.services.history_candidates import get_org_candidates
+from app.services.history_candidates import count_org_candidates, get_org_candidates
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
@@ -203,6 +203,9 @@ async def run_search_pipeline(
     history_used = False
     history_query_used: str | None = None
     history_candidates_found = 0
+    history_total_available = 0
+    history_limit_used: int | None = None
+    history_attempts: list[dict[str, Any]] = []
     alias_candidates_count = 0
     alias_used = False
     alias_query_used: str | None = None
@@ -241,35 +244,80 @@ async def run_search_pipeline(
     )
 
     history_before = len(candidates)
-    history_candidate_ids: list[int] = []
     history_note = "skipped: already have candidates"
     if history_org_id and not candidates:
-        history_candidate_ids = await get_org_candidates(session, history_org_id, limit=200)
-        history_candidates_count = len(history_candidate_ids)
-        if history_candidate_ids:
-            candidates = await search_products(session, search_query, limit=limit, product_ids=history_candidate_ids)
-            if candidates:
+        history_total_available = await count_org_candidates(session, history_org_id)
+        limits_to_try: list[int | None] = [200, 2000]
+        if history_total_available <= 3000:
+            limits_to_try.append(None)
+        for history_limit in limits_to_try:
+            history_candidate_ids = await get_org_candidates(session, history_org_id, limit=history_limit)
+            history_candidates_count = len(history_candidate_ids)
+            if not history_candidate_ids:
+                history_attempts.append(
+                    {
+                        "limit": history_limit,
+                        "candidates_count": 0,
+                        "found_results": 0,
+                        "note": "empty candidates",
+                    }
+                )
+                continue
+            history_results = await search_products(
+                session,
+                search_query,
+                limit=limit,
+                product_ids=history_candidate_ids,
+            )
+            if history_results:
+                candidates = history_results
                 history_used = True
                 history_query_used = search_query
                 history_candidates_found = len(candidates)
-                history_note = "history product_ids matched"
-            else:
-                history_note = "history product_ids найден, но search_products вернул 0"
-        else:
-            history_note = "history candidates not found"
+                history_limit_used = history_limit
+                history_note = f"history matched on limit={history_limit}"
+                history_attempts.append(
+                    {
+                        "limit": history_limit,
+                        "candidates_count": len(history_candidate_ids),
+                        "found_results": len(history_results),
+                        "note": "hit",
+                    }
+                )
+                break
+            history_attempts.append(
+                {
+                    "limit": history_limit,
+                    "candidates_count": len(history_candidate_ids),
+                    "found_results": 0,
+                    "note": "search returned 0",
+                }
+            )
+        if not history_used:
+            history_note = "history attempts exhausted"
     elif not history_org_id:
         history_note = "skipped: org_id unresolved"
-    trace_by_name["history"] = _stage_entry(
+    history_stage = _stage_entry(
         name="history",
         query_used=search_query,
         tokens_used=trace_tokens,
         numbers_used=trace_numbers,
-        product_ids_filter_count=len(history_candidate_ids),
+        product_ids_filter_count=history_candidates_count,
         candidates_before=history_before,
         candidates_after=len(candidates),
         top_candidates=candidates,
         notes=history_note,
     )
+    history_stage.update(
+        {
+            "history_total_available": history_total_available,
+            "attempts": history_attempts,
+            "limit_used": history_limit_used,
+            "history_used": history_used,
+            "top_titles": [str(item.get("title_ru") or "") for item in candidates[:3] if item.get("title_ru")],
+        }
+    )
+    trace_by_name["history"] = history_stage
 
     local_before = len(candidates)
     local_note = "skipped: already have candidates"
