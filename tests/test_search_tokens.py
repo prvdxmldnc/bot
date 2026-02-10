@@ -76,3 +76,14 @@ def test_search_products_matches_chalk_query():
     results = asyncio.run(search_products(session, "мел белый", limit=5))
     assert results
     assert results[0]["id"] == 1
+
+
+def test_search_products_ignores_service_tokens_with_numbers():
+    products = [
+        Product(id=1, title_ru="Молния рулонная Тип 5 (спираль) бежевый цвет КТ 308", sku="MZ-1"),
+        Product(id=2, title_ru="Молния рулонная Тип 3 (спираль) черный цвет", sku="MZ-2"),
+    ]
+    session = DummySession(products)
+    results = asyncio.run(search_products(session, "молния рулонная тип № 5 беж", limit=5))
+    assert results
+    assert results[0]["id"] == 1
