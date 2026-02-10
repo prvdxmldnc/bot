@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Debug: поиск как клиент</title>
+</head>
+<body>
+  <h1>Debug: поиск как клиент</h1>
+
+  <h2>Контекст</h2>
+  <form action="/admin/debug/search-as" method="post">
+    <label>
+      Org ID:
+      <input type="text" name="org_id" value="{{ org_id }}" placeholder="123" />
+    </label>
+    <span>или</span>
+    <label>
+      Телефон пользователя:
+      <input type="text" name="phone" value="{{ phone }}" placeholder="+7999..." />
+    </label>
+    <button type="submit">Выбрать контекст</button>
+  </form>
+
+  {% if selected_user %}
+    <p>Пользователь: #{{ selected_user.id }} — {{ selected_user.fio }}</p>
+  {% endif %}
+  {% if selected_org %}
+    <p>Организация: #{{ selected_org.id }} — {{ selected_org.name }}</p>
+  {% endif %}
+
+  {% if error %}
+    <p style="color: red;">{{ error }}</p>
+  {% endif %}
+
+  <h2>Одиночный запрос</h2>
+  <form action="/admin/debug/search-as" method="post">
+    <input type="hidden" name="org_id" value="{{ org_id }}" />
+    <input type="hidden" name="phone" value="{{ phone }}" />
+    <input type="text" name="query" value="{{ query }}" placeholder="Введите запрос" size="60" />
+    <button type="submit">Проверить</button>
+  </form>
+
+  <h2>Пакетная проверка</h2>
+  <form action="/admin/debug/search-as" method="post">
+    <input type="hidden" name="org_id" value="{{ org_id }}" />
+    <input type="hidden" name="phone" value="{{ phone }}" />
+    <textarea name="batch" rows="6" cols="80" placeholder="Каждый запрос на новой строке">{{ batch }}</textarea>
+    <br />
+    <button type="submit">Проверить пакет</button>
+  </form>
+
+  {% if results %}
+    <h2>Результаты</h2>
+    <ul>
+      {% for item in results %}
+        <li>{{ item.title_ru }} (SKU: {{ item.sku }}) [category_id={{ item.category_id or "" }}]</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if decision %}
+    <h3>Decision payload</h3>
+    <pre>{{ decision | tojson(indent=2) }}</pre>
+    <h3>Stages</h3>
+    <ul>
+      <li>history_used: {{ decision.history_used }}</li>
+      <li>alias_used: {{ decision.alias_used }}</li>
+      <li>decision: {{ decision.decision }}</li>
+      <li>llm_narrow_confidence: {{ decision.llm_narrow_confidence }}</li>
+      <li>rerank_used: {{ decision.rerank_used }}</li>
+    </ul>
+  {% endif %}
+
+  {% if batch_results %}
+    <h2>Batch результаты</h2>
+    <table border="1" cellpadding="6">
+      <tr>
+        <th>Query</th>
+        <th>Decision</th>
+        <th>Candidates</th>
+        <th>Top1</th>
+      </tr>
+      {% for entry in batch_results %}
+        <tr>
+          <td>{{ entry.query }}</td>
+          <td>{{ entry.decision.decision }}</td>
+          <td>{{ entry.decision.candidates_count_final }}</td>
+          <td>{{ entry.results[0].title_ru if entry.results else "" }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  <a href="/admin">Назад</a>
+</body>
+</html>
