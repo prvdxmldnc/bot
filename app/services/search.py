@@ -16,8 +16,8 @@ from app.services.llm_gigachat import chat
 logger = logging.getLogger(__name__)
 
 _SIZE_RE = re.compile(r"(\d+)\s*[xх*]\s*(\d+)")
-_SIZE_SEPARATOR_RE = re.compile(r"(\d)\s*[xх*]\s*(\d)", re.IGNORECASE)
-_SIZE_NA_RE = re.compile(r"(\d)\s+на\s+(\d)", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[a-zа-я0-9]+", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^a-zа-я0-9]+", re.IGNORECASE)
 _STOP_WORDS = {
     "шт",
     "штук",
@@ -25,26 +25,45 @@ _STOP_WORDS = {
     "короб",
     "коробка",
     "коробочки",
+    "рул",
     "рулон",
     "рулонная",
-    "рул",
     "уп",
     "упак",
     "упаковка",
-    "кг",
-    "г",
-    "м",
     "мм",
     "см",
-    "цвет",
+    "м",
+    "м2",
+    "кг",
+    "гр",
+    "г",
     "тип",
+    "номер",
+    "цвет",
     "№",
-    "дешевый",
-    "дешевая",
-    "дешевые",
-    "недорогой",
-    "недорогая",
-    "наличие",
+}
+
+_QTY_UNIT_TOKENS = {
+    "шт",
+    "штук",
+    "кор",
+    "короб",
+    "коробка",
+    "коробочки",
+    "рул",
+    "рулон",
+    "рулонная",
+    "уп",
+    "упак",
+    "упаковка",
+    "мм",
+    "см",
+    "м",
+    "м2",
+    "кг",
+    "гр",
+    "г",
 }
 _COLOR_STEM_MAP = {
     "беж": "бежев",
@@ -54,61 +73,53 @@ _COLOR_STEM_MAP = {
     "син": "син",
     "зел": "зел",
 }
-_COLOR_STEM_TOKENS = set(_COLOR_STEM_MAP.values())
 
-def _normalize_query(text: str) -> str:
-    normalized = text.lower()
-    normalized = _SIZE_SEPARATOR_RE.sub(r"\1 \2", normalized)
-    normalized = _SIZE_NA_RE.sub(r"\1 \2", normalized)
+def normalize_query_text(text: str) -> str:
+    normalized = text.lower().replace("ё", "е")
+    normalized = _NON_ALNUM_RE.sub(" ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _normalize_query(text: str) -> str:
+    return normalize_query_text(text)
 
 
 def _normalization_examples() -> list[tuple[str, str]]:
     return [
         ("механизм подъема", "механизм подъема"),
-        ("8х30", "8 30"),
-        ("1010 x 40", "1010 40"),
+        ("8х30", "8х30"),
+        ("1010 x 40", "1010 x 40"),
     ]
 
 
 def _extract_numbers(text: str) -> list[int]:
-    numbers = []
-    current = ""
-    for ch in text:
-        if ch.isdigit():
-            current += ch
-        elif current:
-            numbers.append(int(current))
-            current = ""
-    if current:
-        numbers.append(int(current))
-    return numbers
+    return [int(token) for token in _TOKEN_RE.findall(text) if token.isdigit()]
 
 
 def _extract_tokens(text: str) -> list[str]:
     tokens = []
-    for token in text.split():
-        token = token.strip()
-        if not token:
+    for token in _TOKEN_RE.findall(text):
+        if token.isdigit() or token in _STOP_WORDS:
             continue
-        if token in _COLOR_STEM_MAP:
-            tokens.append(_COLOR_STEM_MAP[token])
+        if len(token) <= 2:
             continue
-        if len(token) < 3:
-            continue
-        if token in _STOP_WORDS:
-            continue
-        if token.isdigit():
-            continue
-        tokens.append(token)
+        tokens.append(_COLOR_STEM_MAP.get(token, token))
     return tokens
 
 
-def _token_matches_title(token: str, title: str, title_words: list[str]) -> bool:
-    if len(token) <= 3:
-        return any(word.startswith(token) for word in title_words)
-    return any(token in word for word in title_words) or token in title
+def _token_matches_title(token: str, title_words: list[str]) -> bool:
+    return any(word == token or word.startswith(token) for word in title_words)
+
+
+def _effective_numbers(query_text: str, numbers: list[int]) -> list[int]:
+    if not numbers:
+        return numbers
+    query_tokens = _TOKEN_RE.findall(query_text)
+    has_qty_units = any(token in _QTY_UNIT_TOKENS for token in query_tokens)
+    if has_qty_units and len(numbers) == 1:
+        return []
+    return numbers
 
 
 def _score_product(product: Product, query: str, numbers: list[int]) -> float:
@@ -137,14 +148,15 @@ async def search_products(
     q = _normalize_query(query)
     numbers = _extract_numbers(q)
     tokens = _extract_tokens(q)
+    numbers_for_match = _effective_numbers(q, numbers)
     base = select(Product)
     if category_ids:
         base = base.where(Product.category_id.in_(category_ids))
     if product_ids:
         base = base.where(Product.id.in_(product_ids))
     filters = []
-    if numbers:
-        for num in numbers:
+    if numbers_for_match:
+        for num in numbers_for_match:
             filters.append(Product.title_ru.ilike(f"%{num}%"))
         base = base.where(and_(*filters))
     else:
@@ -156,42 +168,32 @@ async def search_products(
             base = base.where(Product.title_ru.ilike(f"%{q}%"))
     result = await session.execute(base.limit(100))
     products = list(result.scalars().all())
-    if not products and len(numbers) >= 3:
+    if not products and len(numbers_for_match) >= 3:
         size_match = _SIZE_RE.search(original)
         if size_match:
             main_numbers = [int(size_match.group(1)), int(size_match.group(2))]
         else:
-            main_numbers = numbers[:2]
+            main_numbers = numbers_for_match[:2]
         fallback_filters = [Product.title_ru.ilike(f"%{num}%") for num in main_numbers]
         fallback_query = select(Product).where(and_(*fallback_filters)).limit(100)
         fallback_result = await session.execute(fallback_query)
         products = list(fallback_result.scalars().all())
-    if numbers:
+    if numbers_for_match:
         products = [
             product
             for product in products
-            if all(str(num) in (product.title_ru or "").lower() for num in numbers)
+            if all(str(num) in (product.title_ru or "").lower() for num in numbers_for_match)
         ]
 
     tokens_to_check = tokens
-    if numbers:
-        tokens_to_check = []
-        for raw_token in q.split():
-            raw_token = raw_token.strip()
-            if not raw_token or raw_token.isdigit():
-                continue
-            if raw_token in _STOP_WORDS:
-                continue
-            token = _COLOR_STEM_MAP.get(raw_token, raw_token)
-            if len(token) >= 4 or raw_token in _COLOR_STEM_MAP:
-                tokens_to_check.append(token)
 
     if tokens_to_check:
         filtered_products = []
         for product in products:
-            title = (product.title_ru or "").lower()
-            words = re.findall(r"[\w-]+", title)
-            if all(_token_matches_title(token, title, words) for token in tokens_to_check):
+            title_words = _TOKEN_RE.findall(normalize_query_text(product.title_ru or ""))
+            sku_words = _TOKEN_RE.findall(normalize_query_text(product.sku or ""))
+            searchable_words = title_words + sku_words
+            if all(_token_matches_title(token, searchable_words) for token in tokens_to_check):
                 filtered_products.append(product)
         products = filtered_products
     scored = []
