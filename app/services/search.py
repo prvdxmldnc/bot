@@ -43,6 +43,16 @@ _STOP_WORDS = {
     "недорогая",
     "наличие",
 }
+_COLOR_STEM_MAP = {
+    "беж": "бежев",
+    "сер": "сер",
+    "бел": "бел",
+    "черн": "черн",
+    "син": "син",
+    "зел": "зел",
+    "красн": "красн",
+}
+_COLOR_STEM_TOKENS = set(_COLOR_STEM_MAP.values())
 
 
 def _normalize_query(text: str) -> str:
@@ -78,6 +88,12 @@ def _extract_numbers(text: str) -> list[int]:
 def _extract_tokens(text: str) -> list[str]:
     tokens = []
     for token in text.split():
+        token = token.strip()
+        if not token:
+            continue
+        if token in _COLOR_STEM_MAP:
+            tokens.append(_COLOR_STEM_MAP[token])
+            continue
         if len(token) < 3:
             continue
         if token in _STOP_WORDS:
@@ -86,6 +102,12 @@ def _extract_tokens(text: str) -> list[str]:
             continue
         tokens.append(token)
     return tokens
+
+
+def _token_matches_title(token: str, title: str, title_words: list[str]) -> bool:
+    if len(token) <= 3:
+        return any(word.startswith(token) for word in title_words)
+    return token in title
 
 
 def _score_product(product: Product, query: str, numbers: list[int]) -> float:
@@ -149,12 +171,19 @@ async def search_products(
             for product in products
             if all(str(num) in (product.title_ru or "").lower() for num in numbers)
         ]
-    if tokens:
-        products = [
-            product
-            for product in products
-            if all(token in (product.title_ru or "").lower() for token in tokens)
-        ]
+
+    tokens_to_check = tokens
+    if numbers:
+        tokens_to_check = [token for token in tokens if len(token) >= 4 or token in _COLOR_STEM_TOKENS]
+
+    if tokens_to_check:
+        filtered_products = []
+        for product in products:
+            title = (product.title_ru or "").lower()
+            words = re.findall(r"[\w-]+", title)
+            if all(_token_matches_title(token, title, words) for token in tokens_to_check):
+                filtered_products.append(product)
+        products = filtered_products
     scored = []
     for product in products:
         score = _score_product(product, q, numbers)
