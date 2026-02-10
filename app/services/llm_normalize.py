@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 
-from app.services.llm_gigachat import chat
+from app.services.llm_client import chat
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ async def suggest_queries(user_text: str) -> list[str]:
         "- Без лишнего текста вне JSON."
     )
     try:
-        response = await chat(
+        content = await chat(
             [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": user_text},
@@ -31,7 +31,6 @@ async def suggest_queries(user_text: str) -> list[str]:
     except Exception:
         logger.exception("LLM normalize failed")
         return []
-    content = response["choices"][0]["message"]["content"]
     try:
         data = json.loads(content)
     except json.JSONDecodeError:

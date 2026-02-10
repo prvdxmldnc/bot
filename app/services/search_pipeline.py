@@ -15,6 +15,7 @@ from app.services.history_candidates import count_org_candidates, get_org_candid
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
+from app.services.llm_rewrite import rewrite_query
 from app.services.order_parser import parse_order_text
 from app.services.org_aliases import find_org_alias_candidates
 from app.services.search import normalize_query_text, search_products
@@ -171,6 +172,10 @@ def _build_attempt_queries(query: str) -> list[str]:
     core_query = " ".join(core_tokens[:6])
 
     return _dedupe_keep_order([full_query, reduced_query, no_color_query, core_query])
+
+
+def _llm_available() -> bool:
+    return settings.llm_enabled and settings.llm_provider != "disabled"
 
 
 def _stage_entry(
@@ -469,6 +474,47 @@ async def run_search_pipeline(
     candidates_count = len(candidates)
     decision = "alias_ok" if alias_used else ("history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm"))
 
+    llm_rewrite_before = len(candidates)
+    llm_rewrite_note = "skipped: already have candidates"
+    llm_rewrite_query = search_query
+    llm_rewrite_candidates_found = 0
+    if not candidates and _llm_available():
+        rewritten_query = await rewrite_query(search_query or text)
+        llm_rewrite_query = rewritten_query
+        if rewritten_query and rewritten_query != (search_query or text):
+            rewritten_results = await search_products(session, rewritten_query, limit=limit)
+            if rewritten_results:
+                candidates = rewritten_results
+                candidates_count = len(candidates)
+                decision = "llm_rewrite_ok"
+                llm_rewrite_candidates_found = len(candidates)
+                llm_rewrite_note = "rewrite matched"
+            else:
+                llm_rewrite_note = "rewrite returned 0"
+        else:
+            llm_rewrite_note = "rewrite unchanged"
+    elif not candidates:
+        llm_rewrite_note = "skipped: llm disabled"
+
+    llm_rewrite_stage = _stage_entry(
+        name="llm_rewrite",
+        query_used=llm_rewrite_query,
+        tokens_used=_extract_trace_tokens_numbers(llm_rewrite_query)[0],
+        numbers_used=_extract_trace_tokens_numbers(llm_rewrite_query)[1],
+        candidates_before=llm_rewrite_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=llm_rewrite_note,
+    )
+    llm_rewrite_stage.update(
+        {
+            "input_query": search_query,
+            "rewritten_query": llm_rewrite_query,
+            "candidates_found": llm_rewrite_candidates_found,
+        }
+    )
+    trace_by_name["llm_rewrite"] = llm_rewrite_stage
+
     alternatives: list[str] = []
     used_alternative: str | None = None
     category_ids: list[int] = []
@@ -479,7 +525,7 @@ async def run_search_pipeline(
     llm_before = len(candidates)
     llm_note = "skipped: already have candidates"
     llm_query_used = search_query
-    if not candidates and parsed_items and settings.gigachat_basic_auth_key:
+    if not candidates and parsed_items and _llm_available():
         alternatives = await suggest_queries(search_query or text)
         for alternative in alternatives:
             retry_candidates = await search_products(session, alternative, limit=limit)
@@ -553,7 +599,7 @@ async def run_search_pipeline(
     rerank_top_score: float | None = None
     rerank_before = len(candidates)
     rerank_note = "skipped: less than 2 candidates or llm disabled"
-    if len(candidates) >= 2 and settings.gigachat_basic_auth_key:
+    if len(candidates) >= 2 and _llm_available():
         rerank_payload = [
             {
                 "product_id": candidate.get("id"),
@@ -651,6 +697,7 @@ async def run_search_pipeline(
             trace_by_name.get("history"),
             trace_by_name.get("alias"),
             trace_by_name.get("local"),
+            trace_by_name.get("llm_rewrite"),
             trace_by_name.get("llm_narrow"),
             trace_by_name.get("rerank"),
         ],

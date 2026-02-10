@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     secret_key: str = "change-me"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    llm_provider: str = "ollama"
+    llm_enabled: bool = False
+    ollama_base_url: str = "http://ollama:11434"
+    ollama_model: str = "qwen2.5:3b-instruct"
+    llm_timeout_seconds: int = 30
     gigachat_oauth_url: str = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     gigachat_basic_auth_key: str = ""
     gigachat_scope: str = "GIGACHAT_API_PERS"

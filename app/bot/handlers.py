@@ -39,7 +39,7 @@ from app.crud import (
 from app.database import get_session_context
 from app.models import Message as ThreadMessage
 from app.models import OrgMember, Order, Product, Thread, User
-from app.services.llm_gigachat import chat, get_access_token
+from app.services.llm_client import chat
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
@@ -160,20 +160,18 @@ async def llm_test(message: Message) -> None:
         await message.answer("Команда доступна только администратору.")
         return
     try:
-        token = await get_access_token()
-        response = await chat(
+        content = await chat(
             [
-                {"role": "system", "content": "Ответь одним словом: ок?"},
-                {"role": "user", "content": "ок?"},
+                {"role": "system", "content": "Ответь одним словом: ок"},
+                {"role": "user", "content": "ок"},
             ],
             temperature=0.2,
         )
-        content = response["choices"][0]["message"]["content"]
     except Exception:
         logger.exception("LLM test failed")
-        await message.answer("LLM тест не прошел. Проверьте настройки доступа.")
+        await message.answer("LLM тест не прошел. Проверьте локальный LLM/Ollama.")
         return
-    await message.answer(f"LLM ответ: {content}\nToken ok: {token[:6]}…")
+    await message.answer(f"LLM ответ: {content}")
 
 
 @router.callback_query(F.data.startswith("alias:"))
