@@ -176,6 +176,7 @@ async def debug_search_as(request: Request) -> HTMLResponse:
             "error": None,
             "results": None,
             "decision": None,
+            "trace": None,
             "batch_results": [],
             "selected_user": None,
             "selected_org": None,
@@ -232,6 +233,7 @@ async def debug_search_as_post(
     batch_results: list[dict[str, object]] = []
     results = None
     decision = None
+    trace = None
     if not error:
         if batch and batch.strip():
             for line in [row.strip() for row in batch.splitlines() if row.strip()]:
@@ -247,6 +249,7 @@ async def debug_search_as_post(
                         "query": line,
                         "results": payload["results"],
                         "decision": payload["decision"],
+                        "trace": payload.get("trace"),
                     }
                 )
         elif query and query.strip():
@@ -259,6 +262,7 @@ async def debug_search_as_post(
             )
             results = payload["results"]
             decision = payload["decision"]
+            trace = payload.get("trace")
 
     return templates.TemplateResponse(
         "debug_search_as.html",
@@ -271,6 +275,7 @@ async def debug_search_as_post(
             "error": error,
             "results": results,
             "decision": decision,
+            "trace": trace,
             "batch_results": batch_results,
             "selected_user": selected_user,
             "selected_org": selected_org,
