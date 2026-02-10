@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session
-from app.models import Category, Order, Product, Thread, User
+from app.models import Category, OrgMember, Order, Organization, Product, Thread, User
+from app.services.search_pipeline import run_search_pipeline
 from app.services.search import llm_search
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -129,6 +130,13 @@ async def debug_users(session: SessionDep) -> dict[str, object]:
     return {"count": len(user_list), "users": user_list}
 
 
+def _normalize_phone(value: str | None) -> str:
+    if not value:
+        return ""
+    digits = "".join(ch for ch in value if ch.isdigit())
+    return f"+{digits}" if digits else ""
+
+
 @router.get("/search", response_class=HTMLResponse)
 async def admin_search(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("search.html", {"request": request})
@@ -152,4 +160,119 @@ async def admin_search_post(
     return templates.TemplateResponse(
         "search.html",
         {"request": request, "query": query, "results": results, "model": settings.openai_model},
+    )
+
+
+@router.get("/debug/search-as", response_class=HTMLResponse)
+async def debug_search_as(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "debug_search_as.html",
+        {
+            "request": request,
+            "org_id": "",
+            "phone": "",
+            "query": "",
+            "batch": "",
+            "error": None,
+            "results": None,
+            "decision": None,
+            "batch_results": [],
+            "selected_user": None,
+            "selected_org": None,
+        },
+    )
+
+
+@router.post("/debug/search-as", response_class=HTMLResponse)
+async def debug_search_as_post(
+    request: Request,
+    session: SessionDep,
+    org_id: Annotated[str | None, Form()] = None,
+    phone: Annotated[str | None, Form()] = None,
+    query: Annotated[str | None, Form()] = None,
+    batch: Annotated[str | None, Form()] = None,
+) -> HTMLResponse:
+    resolved_org_id: int | None = None
+    resolved_user_id: int | None = None
+    selected_user = None
+    selected_org = None
+    error = None
+
+    if org_id and org_id.strip().isdigit():
+        resolved_org_id = int(org_id.strip())
+        result = await session.execute(select(Organization).where(Organization.id == resolved_org_id))
+        selected_org = result.scalar_one_or_none()
+    elif phone:
+        normalized_phone = _normalize_phone(phone)
+        if normalized_phone:
+            user_result = await session.execute(
+                select(User).where(or_(User.phone == normalized_phone, User.phone.ilike(f"%{normalized_phone}%")))
+            )
+            selected_user = user_result.scalar_one_or_none()
+            if selected_user:
+                resolved_user_id = selected_user.id
+                membership_result = await session.execute(
+                    select(OrgMember)
+                    .where(OrgMember.user_id == selected_user.id, OrgMember.status == "active")
+                    .order_by(OrgMember.org_id)
+                )
+                membership = membership_result.scalars().first()
+                if membership:
+                    resolved_org_id = membership.org_id
+                    org_result = await session.execute(
+                        select(Organization).where(Organization.id == resolved_org_id)
+                    )
+                    selected_org = org_result.scalar_one_or_none()
+        if not selected_user:
+            error = "Пользователь с таким телефоном не найден."
+
+    if resolved_org_id is None:
+        error = error or "Не удалось определить организацию для поиска."
+
+    batch_results: list[dict[str, object]] = []
+    results = None
+    decision = None
+    if not error:
+        if batch and batch.strip():
+            for line in [row.strip() for row in batch.splitlines() if row.strip()]:
+                payload = await run_search_pipeline(
+                    session,
+                    org_id=resolved_org_id,
+                    user_id=resolved_user_id,
+                    text=line,
+                    limit=5,
+                )
+                batch_results.append(
+                    {
+                        "query": line,
+                        "results": payload["results"],
+                        "decision": payload["decision"],
+                    }
+                )
+        elif query and query.strip():
+            payload = await run_search_pipeline(
+                session,
+                org_id=resolved_org_id,
+                user_id=resolved_user_id,
+                text=query.strip(),
+                limit=5,
+            )
+            results = payload["results"]
+            decision = payload["decision"]
+
+    return templates.TemplateResponse(
+        "debug_search_as.html",
+        {
+            "request": request,
+            "org_id": org_id or "",
+            "phone": phone or "",
+            "query": query or "",
+            "batch": batch or "",
+            "error": error,
+            "results": results,
+            "decision": decision,
+            "batch_results": batch_results,
+            "selected_user": selected_user,
+            "selected_org": selected_org,
+        },
     )
