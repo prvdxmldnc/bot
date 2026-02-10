@@ -256,10 +256,10 @@ def test_history_adaptive_widening_uses_2000(monkeypatch):
     assert history_stage["history_total_available"] == 2500
     assert history_stage["limit_used"] == 2000
     assert history_stage["history_used"] is True
-    assert history_stage["attempts"][0]["limit"] == 200
-    assert history_stage["attempts"][0]["found_results"] == 0
-    assert history_stage["attempts"][1]["limit"] == 2000
-    assert history_stage["attempts"][1]["found_results"] > 0
+    assert history_stage["attempts"][0]["limit_used"] == 200
+    assert history_stage["attempts"][0]["candidates_found"] == 0
+    assert history_stage["attempts"][1]["limit_used"] == 2000
+    assert history_stage["attempts"][1]["candidates_found"] > 0
 
 
 def test_history_adaptive_widening_skips_all_when_over_3000(monkeypatch):
@@ -288,3 +288,93 @@ def test_history_adaptive_widening_skips_all_when_over_3000(monkeypatch):
 
     asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="синтепон 60"))
     assert calls == [200, 2000]
+
+
+def test_molniya_seraya_not_terminal_no_match(monkeypatch):
+    async def fake_find_alias(*args, **kwargs):
+        return []
+
+    async def fake_count_org_candidates(*args, **kwargs):
+        return 10
+
+    async def fake_get_org_candidates(*args, **kwargs):
+        return [1, 2]
+
+    async def fake_search_products(_session, query, limit=5, category_ids=None, product_ids=None):
+        if "сер" in query:
+            return [{"id": 1, "title_ru": "Молния рулонная серый", "sku": "MZ-1"}]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", fake_count_org_candidates)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="молния серая"))
+
+    assert payload["results"]
+    assert payload["decision"]["decision"] != "no_match"
+
+
+def test_noisy_query_reduces_attempt_queries_and_finds_result(monkeypatch):
+    async def fake_find_alias(*args, **kwargs):
+        return []
+
+    async def fake_count_org_candidates(*args, **kwargs):
+        return 120
+
+    async def fake_get_org_candidates(*args, **kwargs):
+        return [77]
+
+    async def fake_search_products(_session, query, limit=5, category_ids=None, product_ids=None):
+        if "лл70" in query and ("нитк" in query or "нитки" in query):
+            return [{"id": 77, "title_ru": "Нитки ЛЛ70", "sku": "NT-77"}]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", fake_count_org_candidates)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+
+    payload = asyncio.run(
+        search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="нитки лл70 светло серые по кор")
+    )
+
+    assert payload["results"]
+    history_stage = payload["trace"]["stages"][0]
+    assert history_stage["attempt_queries"]
+    assert "лл70" in (history_stage["attempt_query_used"] or "")
+
+
+def test_bolt_8_30_behavior_unchanged(monkeypatch):
+    async def fake_search_products(_session, query, limit=5, category_ids=None, product_ids=None):
+        if query.startswith("болт") and product_ids:
+            return [{"id": 5, "title_ru": "Болт мебельный 8 30", "sku": "B-830"}]
+        return []
+
+    async def fake_find_alias(*args, **kwargs):
+        return []
+
+    async def fake_count_org_candidates(*args, **kwargs):
+        return 40
+
+    async def fake_get_org_candidates(*args, **kwargs):
+        return [5]
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", fake_count_org_candidates)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="болт 8 30"))
+    assert payload["results"]
+    assert payload["decision"]["decision"] in {"history_ok", "alias_ok", "local_ok"}

@@ -48,6 +48,38 @@ _STOP_WORDS = {
     "no",
     "n",
 }
+_DECORATOR_TOKENS = {
+    "светло",
+    "темно",
+    "универсальн",
+    "по",
+    "кор",
+    "короб",
+    "шт",
+    "уп",
+    "рул",
+    "и",
+    "на",
+    "для",
+    "нужно",
+    "нужны",
+    "дешев",
+    "дешевая",
+    "дешевый",
+}
+_COLOR_STEMS = {"сер", "беж", "бел", "черн", "син", "зел", "красн"}
+_COLOR_TOKEN_MAP = {
+    "серая": "сер",
+    "серый": "сер",
+    "серые": "сер",
+    "белый": "бел",
+    "белая": "бел",
+    "черный": "черн",
+    "черная": "черн",
+    "бежевый": "бежев",
+    "бежевая": "бежев",
+}
+_ADJ_ENDINGS = ("ая", "яя", "ый", "ий", "ое", "ее", "ые", "ие", "ого", "ему", "ым", "ой", "ую", "юю")
 
 
 def _fallback_query(parsed_items: list[dict[str, Any]]) -> str:
@@ -74,6 +106,19 @@ def _clean_search_query(parsed_items: list[dict[str, Any]], handler_result) -> s
     return _fallback_query(parsed_items).strip()
 
 
+def _normalize_ru_adj_stem(token: str) -> str:
+    if token in _COLOR_TOKEN_MAP:
+        return _COLOR_TOKEN_MAP[token]
+    if token.isdigit() or len(token) < 5:
+        return token
+    for ending in _ADJ_ENDINGS:
+        if token.endswith(ending):
+            stem = token[: -len(ending)]
+            if len(stem) >= 3:
+                return stem
+    return token
+
+
 def _extract_trace_tokens_numbers(query: str) -> tuple[list[str], list[int]]:
     normalized = normalize_query_text(query)
     tokens: list[str] = []
@@ -82,10 +127,50 @@ def _extract_trace_tokens_numbers(query: str) -> tuple[list[str], list[int]]:
         if token.isdigit():
             numbers.append(int(token))
             continue
+        token = _normalize_ru_adj_stem(token)
         if token in _STOP_WORDS:
             continue
         tokens.append(token)
     return tokens, numbers
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        key = v.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _build_attempt_queries(query: str) -> list[str]:
+    normalized = normalize_query_text(query)
+    base_tokens = [_normalize_ru_adj_stem(token) for token in _TOKEN_RE.findall(normalized)]
+    if not base_tokens:
+        return [normalized] if normalized else []
+
+    full_query = " ".join(base_tokens)
+
+    reduced_tokens = [t for t in base_tokens if t not in _DECORATOR_TOKENS and t not in _STOP_WORDS]
+    reduced_query = " ".join(reduced_tokens)
+
+    no_color_tokens = [t for t in reduced_tokens if t not in _COLOR_STEMS]
+    no_color_query = " ".join(no_color_tokens)
+
+    core_tokens = [
+        t
+        for t in no_color_tokens
+        if t.isdigit()
+        or any(ch.isdigit() for ch in t)
+        or t in {"тип", "din", "лл", "лл70", "ll", "ll70"}
+        or len(t) >= 4
+    ]
+    core_query = " ".join(core_tokens[:6])
+
+    return _dedupe_keep_order([full_query, reduced_query, no_color_query, core_query])
 
 
 def _stage_entry(
@@ -197,6 +282,7 @@ async def run_search_pipeline(
     search_query = _clean_search_query(parsed_items, handler_result) or fallback_query
     normalized_text = normalize_query_text(search_query or text)
     trace_tokens, trace_numbers = _extract_trace_tokens_numbers(search_query or text)
+    attempt_queries = _build_attempt_queries(search_query or text)
     history_org_id = await _resolve_org_id(session, user_id, org_id)
 
     history_candidates_count = 0
@@ -245,6 +331,7 @@ async def run_search_pipeline(
 
     history_before = len(candidates)
     history_note = "skipped: already have candidates"
+    history_attempt_query_used: str | None = None
     if history_org_id and not candidates:
         history_total_available = await count_org_candidates(session, history_org_id)
         limits_to_try: list[int | None] = [200, 2000]
@@ -256,52 +343,60 @@ async def run_search_pipeline(
             if not history_candidate_ids:
                 history_attempts.append(
                     {
-                        "limit": history_limit,
+                        "query_used": search_query,
+                        "limit_used": history_limit,
                         "candidates_count": 0,
-                        "found_results": 0,
+                        "candidates_found": 0,
                         "note": "empty candidates",
                     }
                 )
                 continue
-            history_results = await search_products(
-                session,
-                search_query,
-                limit=limit,
-                product_ids=history_candidate_ids,
-            )
-            if history_results:
-                candidates = history_results
-                history_used = True
-                history_query_used = search_query
-                history_candidates_found = len(candidates)
-                history_limit_used = history_limit
-                history_note = f"history matched on limit={history_limit}"
+            for attempt_query in attempt_queries:
+                history_results = await search_products(
+                    session,
+                    attempt_query,
+                    limit=limit,
+                    product_ids=history_candidate_ids,
+                )
+                if history_results:
+                    candidates = history_results
+                    history_used = True
+                    history_query_used = attempt_query
+                    history_attempt_query_used = attempt_query
+                    history_candidates_found = len(candidates)
+                    history_limit_used = history_limit
+                    history_note = f"history matched on limit={history_limit}"
+                    history_attempts.append(
+                        {
+                            "query_used": attempt_query,
+                            "limit_used": history_limit,
+                            "candidates_count": len(history_candidate_ids),
+                            "candidates_found": len(history_results),
+                            "note": "hit",
+                        }
+                    )
+                    break
                 history_attempts.append(
                     {
-                        "limit": history_limit,
+                        "query_used": attempt_query,
+                        "limit_used": history_limit,
                         "candidates_count": len(history_candidate_ids),
-                        "found_results": len(history_results),
-                        "note": "hit",
+                        "candidates_found": 0,
+                        "note": "search returned 0",
                     }
                 )
+            if history_used:
                 break
-            history_attempts.append(
-                {
-                    "limit": history_limit,
-                    "candidates_count": len(history_candidate_ids),
-                    "found_results": 0,
-                    "note": "search returned 0",
-                }
-            )
         if not history_used:
-            history_note = "history attempts exhausted"
+            history_note = "history_soft_miss -> continue"
     elif not history_org_id:
         history_note = "skipped: org_id unresolved"
+
     history_stage = _stage_entry(
         name="history",
-        query_used=search_query,
-        tokens_used=trace_tokens,
-        numbers_used=trace_numbers,
+        query_used=history_query_used or search_query,
+        tokens_used=_extract_trace_tokens_numbers(history_query_used or search_query)[0],
+        numbers_used=_extract_trace_tokens_numbers(history_query_used or search_query)[1],
         product_ids_filter_count=history_candidates_count,
         candidates_before=history_before,
         candidates_after=len(candidates),
@@ -310,6 +405,8 @@ async def run_search_pipeline(
     )
     history_stage.update(
         {
+            "attempt_queries": attempt_queries,
+            "attempt_query_used": history_attempt_query_used,
             "history_total_available": history_total_available,
             "attempts": history_attempts,
             "limit_used": history_limit_used,
@@ -321,28 +418,56 @@ async def run_search_pipeline(
 
     local_before = len(candidates)
     local_note = "skipped: already have candidates"
+    local_attempts: list[dict[str, Any]] = []
+    local_attempt_query_used: str | None = None
     if parsed_items and not candidates:
-        candidates = await search_products(session, search_query, limit=limit)
-        local_note = "local search matched" if candidates else "local search returned 0"
+        for attempt_query in attempt_queries:
+            local_results = await search_products(session, attempt_query, limit=limit)
+            if local_results:
+                candidates = local_results
+                local_attempt_query_used = attempt_query
+                local_note = "local search matched"
+                local_attempts.append(
+                    {
+                        "query_used": attempt_query,
+                        "candidates_found": len(local_results),
+                        "note": "hit",
+                    }
+                )
+                break
+            local_attempts.append(
+                {
+                    "query_used": attempt_query,
+                    "candidates_found": 0,
+                    "note": "search returned 0",
+                }
+            )
+        if not candidates:
+            local_note = "local search returned 0"
     elif not parsed_items:
         local_note = "skipped: parse_order_text returned empty"
-    trace_by_name["local"] = _stage_entry(
+
+    local_stage = _stage_entry(
         name="local",
-        query_used=search_query,
-        tokens_used=trace_tokens,
-        numbers_used=trace_numbers,
+        query_used=local_attempt_query_used or search_query,
+        tokens_used=_extract_trace_tokens_numbers(local_attempt_query_used or search_query)[0],
+        numbers_used=_extract_trace_tokens_numbers(local_attempt_query_used or search_query)[1],
         candidates_before=local_before,
         candidates_after=len(candidates),
         top_candidates=candidates,
         notes=local_note,
     )
+    local_stage.update(
+        {
+            "attempt_queries": attempt_queries,
+            "attempt_query_used": local_attempt_query_used,
+            "attempts": local_attempts,
+        }
+    )
+    trace_by_name["local"] = local_stage
 
     candidates_count = len(candidates)
-    decision = (
-        "alias_ok"
-        if alias_used
-        else ("history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm"))
-    )
+    decision = "alias_ok" if alias_used else ("history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm"))
 
     alternatives: list[str] = []
     used_alternative: str | None = None
@@ -401,15 +526,16 @@ async def run_search_pipeline(
                             llm_note = "llm narrow + alternative matched"
                             break
                     if not candidates:
-                        decision = "needs_manager"
+                        decision = "no_match"
                         llm_note = "llm narrow categories returned 0"
             else:
-                decision = "needs_manager"
+                decision = "no_match"
                 llm_note = "llm narrow returned empty categories"
     elif not candidates:
-        decision = "needs_manager"
+        decision = "no_match"
         llm_narrow_reason = "llm_disabled"
         llm_note = "skipped: llm disabled"
+
     trace_by_name["llm_narrow"] = _stage_entry(
         name="llm_narrow",
         query_used=llm_query_used,
@@ -457,6 +583,7 @@ async def run_search_pipeline(
             rerank_note = "rerank applied"
         else:
             rerank_note = "rerank returned empty best list"
+
     trace_by_name["rerank"] = _stage_entry(
         name="rerank",
         query_used=search_query,
@@ -467,6 +594,9 @@ async def run_search_pipeline(
         top_candidates=candidates,
         notes=rerank_note,
     )
+
+    if not candidates and decision == "needs_llm":
+        decision = "no_match"
 
     decision_payload = _decision_payload(
         parsed_items=parsed_items,
@@ -515,6 +645,8 @@ async def run_search_pipeline(
             "org_id": history_org_id,
             "user_id": user_id,
         },
+        "history_attempts": history_attempts,
+        "local_attempts": local_attempts,
         "stages": [
             trace_by_name.get("history"),
             trace_by_name.get("alias"),
