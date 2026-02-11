@@ -9,38 +9,6 @@ _QTY_THOUSAND_RE = re.compile(r"(?P<qty>\d+)\s*т\.?\s*шт\b", re.IGNORECASE)
 _NUM_RE = re.compile(r"\d+")
 _SIZE_X_RE = re.compile(r"(\d)\s*[xх*]\s*(\d)", re.IGNORECASE)
 
-_STOP_HEAD_WORDS = {"по", "и", "для", "на", "в", "с", "без", "шт", "уп", "кг", "м", "мм", "см", "кор", "короб", "рул"}
-_COLOR_WORDS = {"беж", "бежев", "бел", "белый", "сер", "серый", "серая", "черн", "черный", "син", "зел"}
-
-
-def _head_token(query: str) -> str | None:
-    tokens = re.findall(r"[a-zа-я0-9]+", query)
-    candidates = [
-        token
-        for token in tokens
-        if not token.isdigit() and token not in _STOP_HEAD_WORDS and token not in _COLOR_WORDS and len(token) >= 4
-    ]
-    if not candidates:
-        return None
-    return sorted(candidates, key=len, reverse=True)[0]
-
-
-def propagate_head(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    prev_head: str | None = None
-    for item in items:
-        query = (item.get("query") or "").strip()
-        head = _head_token(query)
-        if head:
-            prev_head = head
-            item["query_core"] = query
-            continue
-        if prev_head and query:
-            item["query"] = f"{prev_head} {query}".strip()
-            item["query_core"] = item["query"]
-        else:
-            item["query_core"] = query
-    return items
-
 
 def _normalize(text: str) -> str:
     normalized = text.lower()
@@ -95,7 +63,7 @@ def parse_order_text(text: str) -> list[dict[str, Any]]:
                 "query": query,
             }
         )
-    return propagate_head(items)
+    return items
 
 
 if __name__ == "__main__":
