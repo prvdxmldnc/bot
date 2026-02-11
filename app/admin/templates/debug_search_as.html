@@ -49,6 +49,26 @@
     <button type="submit">Проверить пакет</button>
   </form>
 
+
+  {% if decision and decision.multi_item and trace %}
+    <h2>Результаты по позициям</h2>
+    {% set items = trace.items if trace and trace.items else [] %}
+    {% for entry in items %}
+      <details open>
+        <summary>Позиция {{ loop.index }} — {{ entry.query_core }} (qty={{ entry.item.qty }}, unit={{ entry.item.unit }})</summary>
+        <p>Decision: {{ entry.decision.decision if entry.decision else "" }}</p>
+        <ul>
+          {% for item in entry.results %}
+            <li>{{ item.title_ru }} (SKU: {{ item.sku }})</li>
+          {% endfor %}
+        </ul>
+        {% if entry.trace %}
+          <pre>{{ entry.trace | tojson(indent=2) }}</pre>
+        {% endif %}
+      </details>
+    {% endfor %}
+  {% endif %}
+
   {% if results %}
     <h2>Результаты</h2>
     <ul>
