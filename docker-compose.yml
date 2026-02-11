@@ -30,7 +30,7 @@ services:
     volumes:
       - ollama:/root/.ollama
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD", "sh", "-lc", "wget -qO- http://localhost:11434/api/version >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 10

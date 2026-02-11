@@ -378,3 +378,40 @@ def test_bolt_8_30_behavior_unchanged(monkeypatch):
     payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="болт 8 30"))
     assert payload["results"]
     assert payload["decision"]["decision"] in {"history_ok", "alias_ok", "local_ok"}
+
+
+def test_llm_disabled_skips_llm_stages(monkeypatch):
+    async def fake_search_products(_session, query, limit=5, category_ids=None, product_ids=None):
+        return []
+
+    async def fake_find_alias(*args, **kwargs):
+        return []
+
+    async def fake_get_org_candidates(*args, **kwargs):
+        return []
+
+    async def _must_not_call(*args, **kwargs):
+        raise AssertionError("LLM stage should not be called when LLM is disabled")
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search_products)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_find_alias)
+    monkeypatch.setattr(search_pipeline, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda query: [{"query": query, "raw": query}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(search_pipeline, "suggest_queries", _must_not_call)
+    monkeypatch.setattr(search_pipeline, "narrow_categories", _must_not_call)
+    monkeypatch.setattr(search_pipeline, "rewrite_query", _must_not_call)
+    monkeypatch.setattr(search_pipeline, "rerank_products", _must_not_call)
+    monkeypatch.setattr(settings, "llm_enabled", False)
+
+    payload = asyncio.run(
+        search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="неизвестный товар")
+    )
+
+    assert payload["results"] == []
+    assert payload["decision"]["llm_narrow_reason"] == "llm_disabled"
+    llm_rewrite_stage = next(stage for stage in payload["trace"]["stages"] if stage and stage["name"] == "llm_rewrite")
+    llm_narrow_stage = next(stage for stage in payload["trace"]["stages"] if stage and stage["name"] == "llm_narrow")
+    assert llm_rewrite_stage["notes"] == "skipped: llm disabled"
+    assert llm_narrow_stage["notes"] == "skipped: llm disabled"
