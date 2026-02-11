@@ -7,12 +7,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.models import OrgMember, Product
 from app.request_handler import handle_message
 from app.request_handler.types import DialogContext
 from app.services.history_candidates import count_org_candidates, get_org_candidates
 from app.services.llm_category_narrow import narrow_categories
+from app.services.llm_client import llm_available
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
 from app.services.llm_rewrite import rewrite_query
@@ -172,10 +172,6 @@ def _build_attempt_queries(query: str) -> list[str]:
     core_query = " ".join(core_tokens[:6])
 
     return _dedupe_keep_order([full_query, reduced_query, no_color_query, core_query])
-
-
-def _llm_available() -> bool:
-    return settings.llm_enabled and settings.llm_provider != "disabled"
 
 
 def _stage_entry(
@@ -478,7 +474,7 @@ async def run_search_pipeline(
     llm_rewrite_note = "skipped: already have candidates"
     llm_rewrite_query = search_query
     llm_rewrite_candidates_found = 0
-    if not candidates and _llm_available():
+    if not candidates and llm_available():
         rewritten_query = await rewrite_query(search_query or text)
         llm_rewrite_query = rewritten_query
         if rewritten_query and rewritten_query != (search_query or text):
@@ -525,7 +521,7 @@ async def run_search_pipeline(
     llm_before = len(candidates)
     llm_note = "skipped: already have candidates"
     llm_query_used = search_query
-    if not candidates and parsed_items and _llm_available():
+    if not candidates and parsed_items and llm_available():
         alternatives = await suggest_queries(search_query or text)
         for alternative in alternatives:
             retry_candidates = await search_products(session, alternative, limit=limit)
@@ -599,7 +595,7 @@ async def run_search_pipeline(
     rerank_top_score: float | None = None
     rerank_before = len(candidates)
     rerank_note = "skipped: less than 2 candidates or llm disabled"
-    if len(candidates) >= 2 and _llm_available():
+    if len(candidates) >= 2 and llm_available():
         rerank_payload = [
             {
                 "product_id": candidate.get("id"),

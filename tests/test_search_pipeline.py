@@ -96,6 +96,7 @@ def test_llm_disabled_sets_reason(monkeypatch):
     handler_result = types.SimpleNamespace(items=[])
     monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: handler_result)
     monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+    monkeypatch.setattr(settings, "llm_enabled", False)
 
     payload = asyncio.run(
         search_pipeline.run_search_pipeline(DummySession(), org_id=None, user_id=None, text="неизвестно")
@@ -285,6 +286,7 @@ def test_history_adaptive_widening_skips_all_when_over_3000(monkeypatch):
     monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q}])
     monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
     monkeypatch.setattr(settings, "gigachat_basic_auth_key", "")
+    monkeypatch.setattr(settings, "llm_enabled", False)
 
     asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="синтепон 60"))
     assert calls == [200, 2000]
