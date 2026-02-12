@@ -181,7 +181,7 @@ def test_bolt_8_30_behavior_unchanged(monkeypatch):
     assert payload["decision"]["decision"] in {"history_ok", "alias_ok", "local_ok"}
 
 
-def test_pipeline_can_skip_llm_narrow_for_bot_flow(monkeypatch):
+def test_pipeline_can_skip_heavy_llm_stages_for_bot_flow(monkeypatch):
     async def fake_search_empty(*args, **kwargs):
         return []
 
@@ -191,18 +191,16 @@ def test_pipeline_can_skip_llm_narrow_for_bot_flow(monkeypatch):
     async def fake_history_empty(*args, **kwargs):
         return []
 
-    async def fake_rewrite(query):
-        return query
-
-    async def must_not_call_narrow(*args, **kwargs):
-        raise AssertionError("narrow_categories must be skipped when enable_llm_narrow=False")
+    async def must_not_call(*args, **kwargs):
+        raise AssertionError("heavy llm stage should be skipped in bot fast mode")
 
     monkeypatch.setattr(search_pipeline, "search_products", fake_search_empty)
     monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", fake_alias_empty)
     monkeypatch.setattr(search_pipeline, "search_history_products", fake_history_empty)
     monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
-    monkeypatch.setattr(search_pipeline, "rewrite_query", fake_rewrite)
-    monkeypatch.setattr(search_pipeline, "narrow_categories", must_not_call_narrow)
+    monkeypatch.setattr(search_pipeline, "rewrite_query", must_not_call)
+    monkeypatch.setattr(search_pipeline, "narrow_categories", must_not_call)
+    monkeypatch.setattr(search_pipeline, "rerank_products", must_not_call)
     monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
     monkeypatch.setattr(settings, "llm_enabled", True)
     monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
@@ -214,6 +212,8 @@ def test_pipeline_can_skip_llm_narrow_for_bot_flow(monkeypatch):
             user_id=None,
             text="поролон 10мм",
             enable_llm_narrow=False,
+            enable_llm_rewrite=False,
+            enable_rerank=False,
         )
     )
 

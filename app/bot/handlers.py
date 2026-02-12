@@ -660,6 +660,8 @@ async def handle_text_order(message: Message) -> None:
                     text=action_query,
                     limit=5,
                     enable_llm_narrow=False,
+                    enable_llm_rewrite=False,
+                    enable_rerank=False,
                 )
                 stage_candidates = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
                 qty = action.get("qty")

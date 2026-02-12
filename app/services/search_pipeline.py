@@ -276,6 +276,8 @@ async def run_search_pipeline(
     text: str,
     limit: int = 5,
     enable_llm_narrow: bool = True,
+    enable_llm_rewrite: bool = True,
+    enable_rerank: bool = True,
 ) -> dict[str, Any]:
     parsed_items = parse_order_text(text)
     if len(parsed_items) > 1:
@@ -290,6 +292,9 @@ async def run_search_pipeline(
                 user_id=user_id,
                 text=item_query,
                 limit=limit,
+                enable_llm_narrow=enable_llm_narrow,
+                enable_llm_rewrite=enable_llm_rewrite,
+                enable_rerank=enable_rerank,
             )
             item_payloads.append(
                 {
@@ -489,7 +494,7 @@ async def run_search_pipeline(
     llm_rewrite_note = "skipped: already have candidates"
     llm_rewrite_query = search_query
     llm_rewrite_candidates_found = 0
-    if not candidates and llm_available():
+    if not candidates and enable_llm_rewrite and llm_available():
         llm_called = True
         llm_stage = "rewrite"
         rewritten_query = await rewrite_query(search_query or text)
@@ -507,7 +512,7 @@ async def run_search_pipeline(
         else:
             llm_rewrite_note = "rewrite unchanged"
     elif not candidates:
-        llm_rewrite_note = "skipped: llm disabled"
+        llm_rewrite_note = "skipped: llm_rewrite_disabled" if not enable_llm_rewrite else "skipped: llm disabled"
 
     llm_rewrite_stage = _stage_entry(
         name="llm_rewrite",
@@ -623,8 +628,8 @@ async def run_search_pipeline(
     rerank_best_ids: list[int] = []
     rerank_top_score: float | None = None
     rerank_before = len(candidates)
-    rerank_note = "skipped: less than 2 candidates or llm disabled"
-    if 2 <= len(candidates) <= 30 and llm_available():
+    rerank_note = "skipped: rerank disabled" if not enable_rerank else "skipped: less than 2 candidates or llm disabled"
+    if enable_rerank and 2 <= len(candidates) <= 30 and llm_available():
         llm_called = True
         llm_stage = "rerank"
         rerank_payload = [

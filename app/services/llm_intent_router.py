@@ -22,6 +22,11 @@ _ADD_PREFIX_RE = re.compile(
 )
 _ADD_SPLIT_RE = re.compile(r"\b(и\s+что|и\s+кстати|а\s+также|,)\b", re.IGNORECASE)
 _ETA_HINT_RE = re.compile(r"когда\s+(придет|будет|ожидается)|срок\s+поставки", re.IGNORECASE)
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_COMMAND_RE = re.compile(
+    r"\b(добавь(?:те)?|добавить|нужно|надо|положи|закажи|в\s+заказ|пожалуйста|мне\s+нужно|кстати|что\s+там|по\s+поводу)\b",
+    re.IGNORECASE,
+)
 
 _UNIT_MAP = {
     "мотка": "моток",
@@ -96,7 +101,11 @@ def _extract_add_item_from_text(text: str) -> Action | None:
     if not cleaned:
         return None
 
-    work = cleaned
+    if not re.search(r"\b(добавь(?:те)?|добавить|нужно|надо|положи|закажи|в\s+заказ)\b", cleaned, flags=re.IGNORECASE):
+        return None
+
+    work = _ADD_PREFIX_RE.sub("", cleaned)
+    work = _ADD_SPLIT_RE.split(work)[0].strip()
     for phrase in _NOISE_PHRASES:
         work = re.sub(rf"\b{re.escape(phrase)}\b", " ", work, flags=re.IGNORECASE)
 
@@ -109,9 +118,7 @@ def _extract_add_item_from_text(text: str) -> Action | None:
         unit = _UNIT_MAP.get(unit_raw, unit_raw)
         work = (work[: match.start()] + " " + work[match.end() :]).strip()
 
-    work = _ADD_PREFIX_RE.sub("", work)
-    work = _ADD_SPLIT_RE.split(work)[0].strip()
-    work = re.sub(r"\b(добавь(?:те)?|добавить|мне\s+нужно|в\s+заказ|пожалуйста|и)\b", " ", work, flags=re.IGNORECASE)
+    work = _COMMAND_RE.sub(" ", work)
     work = re.sub(r"\s+", " ", work).strip(" ,.-")
     if not work:
         return None
@@ -139,7 +146,35 @@ def _ensure_stock_eta_action(text: str, actions: list[Action]) -> list[Action]:
     return actions
 
 
+def _sanitize_action_language(actions: list[Action]) -> list[Action]:
+    cleaned: list[Action] = []
+    dropped_non_ru = False
+    for action in actions:
+        if action.type == "ADD_ITEM":
+            query = (action.query_core or "").strip()
+            if _LATIN_RE.search(query):
+                dropped_non_ru = True
+                continue
+            action.query_core = query
+        if action.type == "ASK_STOCK_ETA":
+            subject = (action.subject or action.query_core or "").strip()
+            if _LATIN_RE.search(subject):
+                dropped_non_ru = True
+                continue
+            action.subject = subject or None
+            if not action.query_core:
+                action.query_core = action.subject
+        cleaned.append(action)
+
+    if dropped_non_ru and not cleaned:
+        return [Action(type="UNKNOWN", query_core="Уточните запрос по-русски")]
+    return cleaned
+
+
 def _fallback_actions(text: str) -> RouterResult:
+    if _LATIN_RE.search(text or "") and not re.search(r"[а-яё]", (text or "").lower()):
+        return RouterResult(actions=[Action(type="UNKNOWN", query_core="Уточните запрос по-русски")])
+
     parsed = parse_order_text(text)
     actions: list[Action] = []
     for item in parsed:
@@ -181,6 +216,7 @@ def parse_actions_from_text(text: str, llm_payload: str | None = None) -> Router
                         action.subject = action.query_core or _extract_eta_subject(text)
                         if not action.query_core:
                             action.query_core = action.subject
+                result.actions = _sanitize_action_language(result.actions)
                 result.actions = _ensure_stock_eta_action(text, result.actions)
                 return result
         except ValidationError:
@@ -196,8 +232,10 @@ def parse_actions_from_text(text: str, llm_payload: str | None = None) -> Router
 
 
 async def route_message(text: str) -> dict:
-    if not llm_available():
-        return parse_actions_from_text(text).model_dump()
+    heuristic_actions = parse_actions_from_text(text)
+    has_meaningful = any(action.type in {"ADD_ITEM", "ASK_STOCK_ETA", "MANAGER"} for action in heuristic_actions.actions)
+    if has_meaningful or not llm_available():
+        return heuristic_actions.model_dump()
 
     system_prompt = (
         "Ты роутер намерений для B2B заказов. Верни ТОЛЬКО JSON без пояснений. "
@@ -212,7 +250,11 @@ async def route_message(text: str) -> dict:
 
     try:
         content = await llm_chat(messages, temperature=0.1)
-        return parse_actions_from_text(text, content).model_dump()
+        parsed = parse_actions_from_text(text, content)
+        parsed.actions = _sanitize_action_language(parsed.actions)
+        if not parsed.actions:
+            parsed = RouterResult(actions=[Action(type="UNKNOWN", query_core="Уточните запрос по-русски")])
+        return parsed.model_dump()
     except Exception:
         logger.info("Intent router fallback activated", exc_info=True)
         return parse_actions_from_text(text).model_dump()
