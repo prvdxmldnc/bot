@@ -14,7 +14,9 @@ def test_parse_actions_from_text_multi_intent_message():
     assert add_action.qty == 3
     assert "нит" in (add_action.query_core or "")
     assert "бел" in (add_action.query_core or "")
-    assert "поролон" in (eta_action.query_core or "")
+    assert "поролон" in (eta_action.subject or "")
+    assert "3" not in (add_action.query_core or "")
+    assert "добав" not in (add_action.query_core or "")
 
 
 def test_parse_actions_heuristic_adds_eta_when_llm_unknown():

@@ -23,10 +23,47 @@ _ADD_PREFIX_RE = re.compile(
 _ADD_SPLIT_RE = re.compile(r"\b(и\s+что|и\s+кстати|а\s+также|,)\b", re.IGNORECASE)
 _ETA_HINT_RE = re.compile(r"когда\s+(придет|будет|ожидается)|срок\s+поставки", re.IGNORECASE)
 
+_UNIT_MAP = {
+    "мотка": "моток",
+    "мотков": "моток",
+    "моток": "моток",
+    "штук": "шт",
+    "шт": "шт",
+    "рулона": "рулон",
+    "рулонов": "рулон",
+    "рулон": "рулон",
+    "упаковка": "упаковка",
+    "упаковки": "упаковка",
+    "коробочки": "коробка",
+    "коробка": "коробка",
+    "коробки": "коробка",
+    "пачка": "пачка",
+    "пачки": "пачка",
+    "кг": "кг",
+}
+
+_NOISE_PHRASES = [
+    "что там",
+    "по поводу",
+    "и кстати",
+    "а также",
+    "пожалуйста",
+    "мне нужно",
+    "в заказ",
+]
+
+_ETA_SUBJECT_KEYS = [
+    ("поролон", "поролон"),
+    ("ппу", "ппу"),
+    ("синтепон", "синтепон"),
+    ("спанбонд", "спанбонд"),
+]
+
 
 class Action(BaseModel):
     type: Literal["ADD_ITEM", "ASK_STOCK_ETA", "MANAGER", "UNKNOWN"]
     query_core: str | None = None
+    subject: str | None = None
     qty: float | None = None
     unit: str | None = None
 
@@ -58,21 +95,36 @@ def _extract_add_item_from_text(text: str) -> Action | None:
     cleaned = re.sub(r"\s+", " ", text or "").strip()
     if not cleaned:
         return None
-    match = _QTY_UNIT_RE.search(cleaned)
+
+    work = cleaned
+    for phrase in _NOISE_PHRASES:
+        work = re.sub(rf"\b{re.escape(phrase)}\b", " ", work, flags=re.IGNORECASE)
+
+    match = _QTY_UNIT_RE.search(work)
     qty: float | None = None
     unit: str | None = None
-    candidate = cleaned
     if match:
         qty = float(match.group("qty"))
-        unit = match.group("unit").lower()
-        candidate = cleaned[match.end() :].strip()
-    candidate = _ADD_PREFIX_RE.sub("", candidate)
-    candidate = _ADD_SPLIT_RE.split(candidate)[0].strip()
-    candidate = re.sub(r"\b(пожалуйста|добавь(?:те)?|мне\s+нужно|в\s+заказ)\b", "", candidate, flags=re.IGNORECASE)
-    candidate = re.sub(r"\s+", " ", candidate).strip(" ,.-")
-    if not candidate:
+        unit_raw = match.group("unit").lower()
+        unit = _UNIT_MAP.get(unit_raw, unit_raw)
+        work = (work[: match.start()] + " " + work[match.end() :]).strip()
+
+    work = _ADD_PREFIX_RE.sub("", work)
+    work = _ADD_SPLIT_RE.split(work)[0].strip()
+    work = re.sub(r"\b(добавь(?:те)?|добавить|мне\s+нужно|в\s+заказ|пожалуйста|и)\b", " ", work, flags=re.IGNORECASE)
+    work = re.sub(r"\s+", " ", work).strip(" ,.-")
+    if not work:
         return None
-    return Action(type="ADD_ITEM", query_core=candidate, qty=qty or 1.0, unit=unit)
+
+    return Action(type="ADD_ITEM", query_core=work, qty=qty or 1.0, unit=unit)
+
+
+def _extract_eta_subject(text: str) -> str | None:
+    lower = (text or "").lower()
+    for needle, subject in _ETA_SUBJECT_KEYS:
+        if needle in lower:
+            return subject
+    return None
 
 
 def _ensure_stock_eta_action(text: str, actions: list[Action]) -> list[Action]:
@@ -81,9 +133,9 @@ def _ensure_stock_eta_action(text: str, actions: list[Action]) -> list[Action]:
         return actions
     if not _ETA_HINT_RE.search(text or ""):
         return actions
-    lower = (text or "").lower()
-    if "поролон" in lower:
-        actions.append(Action(type="ASK_STOCK_ETA", query_core="поролон"))
+    subject = _extract_eta_subject(text)
+    if subject:
+        actions.append(Action(type="ASK_STOCK_ETA", query_core=subject, subject=subject))
     return actions
 
 
@@ -124,6 +176,11 @@ def parse_actions_from_text(text: str, llm_payload: str | None = None) -> Router
             else:
                 result = RouterResult(actions=[])
             if result.actions:
+                for action in result.actions:
+                    if action.type == "ASK_STOCK_ETA" and not action.subject:
+                        action.subject = action.query_core or _extract_eta_subject(text)
+                        if not action.query_core:
+                            action.query_core = action.subject
                 result.actions = _ensure_stock_eta_action(text, result.actions)
                 return result
         except ValidationError:
@@ -143,9 +200,9 @@ async def route_message(text: str) -> dict:
         return parse_actions_from_text(text).model_dump()
 
     system_prompt = (
-        "Ты роутер намерений для B2B заказов. Верни строго JSON и ничего больше. "
+        "Ты роутер намерений для B2B заказов. Верни ТОЛЬКО JSON без пояснений. "
         "Допустимы 2 формата: массив действий или объект {\"actions\":[...]}. "
-        "Каждое действие: {\"type\":\"ADD_ITEM|ASK_STOCK_ETA|MANAGER|UNKNOWN\",\"query_core\":\"...\",\"qty\":number,\"unit\":\"...\"}. "
+        "Каждое действие: {\"type\":\"ADD_ITEM|ASK_STOCK_ETA|MANAGER|UNKNOWN\",\"query_core\":\"...\",\"subject\":\"...\",\"qty\":number,\"unit\":\"...\"}. "
         "Если есть и добавление товара, и вопрос о сроке — верни оба действия."
     )
     messages = [

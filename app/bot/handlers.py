@@ -659,6 +659,7 @@ async def handle_text_order(message: Message) -> None:
                     user_id=user.id,
                     text=action_query,
                     limit=5,
+                    enable_llm_narrow=False,
                 )
                 stage_candidates = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
                 qty = action.get("qty")
@@ -671,13 +672,13 @@ async def handle_text_order(message: Message) -> None:
                 else:
                     lines.append(f"{idx}. {action_query}{qty_suffix} → не нашли, уточни товар/артикул")
             if eta_actions:
-                eta_query = str(eta_actions[0].get("query_core") or "").strip()
+                eta_query = str(eta_actions[0].get("subject") or eta_actions[0].get("query_core") or "").strip()
                 lines.append(await get_stock_eta(eta_query))
             if lines:
                 await message.answer("Результат обработки:\n" + "\n".join(lines))
                 return
         if eta_actions:
-            eta_query = str(eta_actions[0].get("query_core") or "").strip()
+            eta_query = str(eta_actions[0].get("subject") or eta_actions[0].get("query_core") or "").strip()
             await message.answer(await get_stock_eta(eta_query))
             return
         parsed_items = parse_order_text(message.text)

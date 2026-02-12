@@ -275,6 +275,7 @@ async def run_search_pipeline(
     user_id: int | None,
     text: str,
     limit: int = 5,
+    enable_llm_narrow: bool = True,
 ) -> dict[str, Any]:
     parsed_items = parse_order_text(text)
     if len(parsed_items) > 1:
@@ -537,7 +538,7 @@ async def run_search_pipeline(
     llm_before = len(candidates)
     llm_note = "skipped: already have candidates"
     llm_query_used = search_query
-    if not candidates and parsed_items and llm_available():
+    if not candidates and parsed_items and enable_llm_narrow and llm_available():
         llm_called = True
         llm_stage = "normalize"
         alternatives = await suggest_queries(search_query or text)
@@ -596,6 +597,15 @@ async def run_search_pipeline(
         decision = "no_match"
         llm_narrow_reason = "llm_disabled"
         llm_note = "skipped: llm disabled"
+
+    if not candidates:
+        decision = "no_match"
+        if not enable_llm_narrow:
+            llm_narrow_reason = "llm_narrow_disabled"
+            llm_note = "skipped: llm_narrow_disabled"
+        elif not llm_available():
+            llm_narrow_reason = "llm_disabled"
+            llm_note = "skipped: llm disabled"
 
     trace_by_name["llm_narrow"] = _stage_entry(
         name="llm_narrow",
