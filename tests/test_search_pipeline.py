@@ -218,3 +218,38 @@ def test_pipeline_can_skip_llm_narrow_for_bot_flow(monkeypatch):
     )
 
     assert payload["decision"]["llm_narrow_reason"] == "llm_narrow_disabled"
+
+
+def test_pipeline_import_and_history_signature_alignment(monkeypatch):
+    import app.main as _main  # noqa: F401
+    import app.services.history_candidates as history_candidates
+
+    async def fake_get_org_candidates(_session, _org_id, limit=200):
+        assert isinstance(limit, (int, type(None)))
+        return [1]
+
+    async def fake_history_search_products(_session, query, limit=10, category_ids=None, product_ids=None):
+        assert query == "test query"
+        assert product_ids == [1]
+        return []
+
+    monkeypatch.setattr(history_candidates, "get_org_candidates", fake_get_org_candidates)
+    monkeypatch.setattr(history_candidates, "search_products", fake_history_search_products)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "llm_enabled", False)
+
+    payload = asyncio.run(
+        search_pipeline.run_search_pipeline(
+            DummySession(),
+            org_id=42,
+            user_id=None,
+            text="test query",
+        )
+    )
+
+    assert isinstance(payload, dict)
+    assert "decision" in payload
