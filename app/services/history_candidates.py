@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import OrgProductStats
-
+from app.services.search import search_products
 
 async def count_org_candidates(session: AsyncSession, org_id: int) -> int:
     result = await session.execute(
@@ -26,6 +25,23 @@ async def get_org_candidates(session: AsyncSession, org_id: int, limit: int | No
         query = query.limit(limit)
     result = await session.execute(query)
     return [row[0] for row in result.all()]
+
+
+async def search_history_products(
+    session: AsyncSession,
+    org_id: int,
+    query: str,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    product_ids = await get_org_candidates(session, org_id, limit=limit)
+    if not product_ids:
+        return []
+    return await search_products(
+        session,
+        query,
+        limit=10,
+        product_ids=product_ids,
+    )
 
 
 async def upsert_org_product_stats(
@@ -63,8 +79,3 @@ async def upsert_org_product_stats(
             )
             session.add(stats)
     await session.flush()
-# --- Backward compatible alias ---
-# Some code paths (search_pipeline) may import search_history_products from older revisions.
-# Keep this wrapper to avoid ImportError on deploy.
-async def search_history_products(session, org_id: int, limit: int = 200):
-    return await get_org_candidates(session, org_id, limit=limit)
