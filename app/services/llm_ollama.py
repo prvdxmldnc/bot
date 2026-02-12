@@ -48,7 +48,12 @@ async def chat(messages: list[dict[str, str]], temperature: float = 0.2) -> str:
         "model": settings.ollama_model,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": temperature},
+        "keep_alive": settings.ollama_keep_alive,
+        "options": {
+            "temperature": temperature,
+            "num_predict": settings.ollama_num_predict,
+            "num_ctx": settings.ollama_num_ctx,
+        },
     }
     data = await _post_ollama("/api/chat", payload)
     message = data.get("message") if isinstance(data, dict) else None
@@ -64,7 +69,12 @@ async def generate(prompt: str, temperature: float = 0.2) -> str:
         "model": settings.ollama_model,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": temperature},
+        "keep_alive": settings.ollama_keep_alive,
+        "options": {
+            "temperature": temperature,
+            "num_predict": settings.ollama_num_predict,
+            "num_ctx": settings.ollama_num_ctx,
+        },
     }
     data = await _post_ollama("/api/generate", payload)
     content = str(data.get("response") or "").strip()

@@ -40,6 +40,7 @@ from app.database import get_session_context
 from app.models import Message as ThreadMessage
 from app.models import OrgMember, Order, Product, Thread, User
 from app.services.llm_client import chat
+from app.services.llm_intent_router import get_stock_eta, route_message
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_normalize import suggest_queries
 from app.services.llm_rerank import rerank_products
@@ -47,6 +48,7 @@ from app.services.org_aliases import autolearn_org_alias, find_org_alias_candida
 from app.services.order_parser import parse_order_text
 from app.services.search import search_products
 from app.services.history_candidates import get_org_candidates
+from app.services.search_pipeline import run_search_pipeline
 from app.request_handler import handle_message as handle_request_message
 from app.request_handler.types import DialogContext
 from app.utils.security import hash_password, verify_password
@@ -640,6 +642,42 @@ async def handle_text_order(message: Message) -> None:
             return
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
+
+        intent_result = await route_message(message.text)
+        actions = intent_result.get("actions", []) if isinstance(intent_result, dict) else []
+        add_actions = [a for a in actions if isinstance(a, dict) and a.get("type") == "ADD_ITEM"]
+        eta_actions = [a for a in actions if isinstance(a, dict) and a.get("type") == "ASK_STOCK_ETA"]
+        if add_actions:
+            lines: list[str] = []
+            for idx, action in enumerate(add_actions[:5], start=1):
+                action_query = str(action.get("query_core") or "").strip()
+                if not action_query:
+                    continue
+                pipeline_result = await run_search_pipeline(
+                    session,
+                    org_id=None,
+                    user_id=user.id,
+                    text=action_query,
+                    limit=5,
+                )
+                stage_candidates = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
+                if stage_candidates:
+                    top = stage_candidates[0]
+                    lines.append(
+                        f"{idx}. {action_query} → {top.get('title_ru')} (SKU: {top.get('sku')})"
+                    )
+                else:
+                    lines.append(f"{idx}. {action_query} → не нашли, передали менеджеру")
+            if eta_actions:
+                eta_query = str(eta_actions[0].get("query_core") or "").strip()
+                lines.append(await get_stock_eta(eta_query))
+            if lines:
+                await message.answer("Результат обработки:\n" + "\n".join(lines))
+                return
+        if eta_actions:
+            eta_query = str(eta_actions[0].get("query_core") or "").strip()
+            await message.answer(await get_stock_eta(eta_query))
+            return
         parsed_items = parse_order_text(message.text)
         handler_result = handle_request_message(
             message.text,

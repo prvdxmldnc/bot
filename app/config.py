@@ -16,8 +16,11 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     llm_enabled: bool = False
     ollama_base_url: str = "http://ollama:11434"
-    ollama_model: str = "qwen2.5:3b-instruct"
+    ollama_model: str = "qwen2.5:1.5b-instruct"
     llm_timeout_seconds: int = 30
+    ollama_num_predict: int = 128
+    ollama_num_ctx: int = 2048
+    ollama_keep_alive: str = "5m"
     gigachat_oauth_url: str = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     gigachat_basic_auth_key: str = ""
     gigachat_scope: str = "GIGACHAT_API_PERS"

@@ -30,10 +30,11 @@ services:
     volumes:
       - ollama:/root/.ollama
     healthcheck:
-      test: ["CMD", "sh", "-lc", "wget -qO- http://localhost:11434/api/version >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "/bin/ollama", "list"]
+      interval: 20s
+      timeout: 15s
+      retries: 20
+      start_period: 60s
 
   api:
     build: .
