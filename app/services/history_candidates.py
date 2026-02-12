@@ -63,3 +63,8 @@ async def upsert_org_product_stats(
             )
             session.add(stats)
     await session.flush()
+# --- Backward compatible alias ---
+# Some code paths (search_pipeline) may import search_history_products from older revisions.
+# Keep this wrapper to avoid ImportError on deploy.
+async def search_history_products(session, org_id: int, limit: int = 200):
+    return await get_org_candidates(session, org_id, limit=limit)
