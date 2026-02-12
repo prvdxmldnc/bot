@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import OrgMember, Product
 from app.request_handler import handle_message
 from app.request_handler.types import DialogContext
-from app.services.history_candidates import count_org_candidates, get_org_candidates
+from app.services.history_candidates import count_org_candidates, search_history_products
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_client import llm_available
 from app.services.llm_normalize import suggest_queries
@@ -275,8 +275,43 @@ async def run_search_pipeline(
     user_id: int | None,
     text: str,
     limit: int = 5,
+    enable_llm_narrow: bool = True,
 ) -> dict[str, Any]:
     parsed_items = parse_order_text(text)
+    if len(parsed_items) > 1:
+        item_payloads: list[dict[str, Any]] = []
+        for item in parsed_items:
+            item_query = str(item.get("query_core") or item.get("query") or item.get("raw") or "").strip()
+            if not item_query:
+                continue
+            sub_payload = await run_search_pipeline(
+                session,
+                org_id=org_id,
+                user_id=user_id,
+                text=item_query,
+                limit=limit,
+            )
+            item_payloads.append(
+                {
+                    "item": item,
+                    "query_core": item_query,
+                    "results": sub_payload.get("results", []),
+                    "decision": sub_payload.get("decision", {}),
+                    "trace": sub_payload.get("trace"),
+                }
+            )
+        primary = item_payloads[0] if item_payloads else {"results": [], "decision": {}, "trace": None}
+        decision = dict(primary.get("decision") or {})
+        decision["multi_item"] = True
+        trace = dict(primary.get("trace") or {})
+        trace["items"] = item_payloads
+        return {
+            "results": primary.get("results", []),
+            "decision": decision,
+            "trace": trace,
+            "items": item_payloads,
+        }
+
     handler_result = handle_message(text, DialogContext(last_state=None, last_items=[], topic="unknown"))
     fallback_query = _fallback_query(parsed_items)
     primary_query = _primary_query(handler_result) or fallback_query
@@ -333,60 +368,35 @@ async def run_search_pipeline(
     history_before = len(candidates)
     history_note = "skipped: already have candidates"
     history_attempt_query_used: str | None = None
+    history_attribute_conflict = False
     if history_org_id and not candidates:
         history_total_available = await count_org_candidates(session, history_org_id)
-        limits_to_try: list[int | None] = [200, 2000]
-        if history_total_available <= 3000:
-            limits_to_try.append(None)
-        for history_limit in limits_to_try:
-            history_candidate_ids = await get_org_candidates(session, history_org_id, limit=history_limit)
-            history_candidates_count = len(history_candidate_ids)
-            if not history_candidate_ids:
-                history_attempts.append(
-                    {
-                        "query_used": search_query,
-                        "limit_used": history_limit,
-                        "candidates_count": 0,
-                        "candidates_found": 0,
-                        "note": "empty candidates",
-                    }
-                )
-                continue
-            for attempt_query in attempt_queries:
-                history_results = await search_products(
-                    session,
-                    attempt_query,
-                    limit=limit,
-                    product_ids=history_candidate_ids,
-                )
-                if history_results:
-                    candidates = history_results
-                    history_used = True
-                    history_query_used = attempt_query
-                    history_attempt_query_used = attempt_query
-                    history_candidates_found = len(candidates)
-                    history_limit_used = history_limit
-                    history_note = f"history matched on limit={history_limit}"
-                    history_attempts.append(
-                        {
-                            "query_used": attempt_query,
-                            "limit_used": history_limit,
-                            "candidates_count": len(history_candidate_ids),
-                            "candidates_found": len(history_results),
-                            "note": "hit",
-                        }
-                    )
-                    break
-                history_attempts.append(
-                    {
-                        "query_used": attempt_query,
-                        "limit_used": history_limit,
-                        "candidates_count": len(history_candidate_ids),
-                        "candidates_found": 0,
-                        "note": "search returned 0",
-                    }
-                )
-            if history_used:
+        history_candidates_count = history_total_available
+        for attempt_query in attempt_queries:
+            history_results = await search_history_products(
+                session,
+                history_org_id,
+                attempt_query,
+                limit=limit,
+            )
+            history_attempts.append(
+                {
+                    "query_used": attempt_query,
+                    "limit_used": None,
+                    "candidates_count": history_total_available,
+                    "candidates_found": len(history_results),
+                    "note": "hit" if history_results else "search returned 0",
+                }
+            )
+            if history_results:
+                candidates = history_results
+                history_used = True
+                history_query_used = attempt_query
+                history_attempt_query_used = attempt_query
+                history_candidates_found = len(candidates)
+                history_limit_used = None
+                history_attribute_conflict = any(bool(item.get("attribute_conflict")) for item in candidates)
+                history_note = "history scored retrieval matched"
                 break
         if not history_used:
             history_note = "history_soft_miss -> continue"
@@ -412,6 +422,7 @@ async def run_search_pipeline(
             "attempts": history_attempts,
             "limit_used": history_limit_used,
             "history_used": history_used,
+            "attribute_conflict": history_attribute_conflict,
             "top_titles": [str(item.get("title_ru") or "") for item in candidates[:3] if item.get("title_ru")],
         }
     )
@@ -470,11 +481,17 @@ async def run_search_pipeline(
     candidates_count = len(candidates)
     decision = "alias_ok" if alias_used else ("history_ok" if history_used else ("local_ok" if candidates_count > 0 else "needs_llm"))
 
+    candidates_count_before_llm = len(candidates)
+    llm_called = False
+    llm_stage = "none"
+
     llm_rewrite_before = len(candidates)
     llm_rewrite_note = "skipped: already have candidates"
     llm_rewrite_query = search_query
     llm_rewrite_candidates_found = 0
     if not candidates and llm_available():
+        llm_called = True
+        llm_stage = "rewrite"
         rewritten_query = await rewrite_query(search_query or text)
         llm_rewrite_query = rewritten_query
         if rewritten_query and rewritten_query != (search_query or text):
@@ -521,7 +538,9 @@ async def run_search_pipeline(
     llm_before = len(candidates)
     llm_note = "skipped: already have candidates"
     llm_query_used = search_query
-    if not candidates and parsed_items and llm_available():
+    if not candidates and parsed_items and enable_llm_narrow and llm_available():
+        llm_called = True
+        llm_stage = "normalize"
         alternatives = await suggest_queries(search_query or text)
         for alternative in alternatives:
             retry_candidates = await search_products(session, alternative, limit=limit)
@@ -535,6 +554,7 @@ async def run_search_pipeline(
                 break
         if not candidates:
             narrowed_query = search_query or text
+            llm_stage = "narrow"
             narrow_result = await narrow_categories(narrowed_query, session)
             category_ids = narrow_result.get("category_ids", [])
             llm_narrow_confidence = narrow_result.get("confidence")
@@ -578,6 +598,15 @@ async def run_search_pipeline(
         llm_narrow_reason = "llm_disabled"
         llm_note = "skipped: llm disabled"
 
+    if not candidates:
+        decision = "no_match"
+        if not enable_llm_narrow:
+            llm_narrow_reason = "llm_narrow_disabled"
+            llm_note = "skipped: llm_narrow_disabled"
+        elif not llm_available():
+            llm_narrow_reason = "llm_disabled"
+            llm_note = "skipped: llm disabled"
+
     trace_by_name["llm_narrow"] = _stage_entry(
         name="llm_narrow",
         query_used=llm_query_used,
@@ -595,7 +624,9 @@ async def run_search_pipeline(
     rerank_top_score: float | None = None
     rerank_before = len(candidates)
     rerank_note = "skipped: less than 2 candidates or llm disabled"
-    if len(candidates) >= 2 and llm_available():
+    if 2 <= len(candidates) <= 30 and llm_available():
+        llm_called = True
+        llm_stage = "rerank"
         rerank_payload = [
             {
                 "product_id": candidate.get("id"),
@@ -689,6 +720,9 @@ async def run_search_pipeline(
         },
         "history_attempts": history_attempts,
         "local_attempts": local_attempts,
+        "candidates_count_before_llm": candidates_count_before_llm,
+        "llm_called": llm_called,
+        "llm_stage": llm_stage,
         "stages": [
             trace_by_name.get("history"),
             trace_by_name.get("alias"),
@@ -705,6 +739,9 @@ async def run_search_pipeline(
             "rerank_used": rerank_used,
             "rerank_best_ids": rerank_best_ids,
             "rerank_top_score": rerank_top_score,
+            "candidates_count_before_llm": candidates_count_before_llm,
+            "llm_called": llm_called,
+            "llm_stage": llm_stage,
         },
         "trace": trace,
     }
