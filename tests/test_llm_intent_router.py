@@ -3,11 +3,35 @@ import asyncio
 from app.services import llm_intent_router
 
 
+def test_parse_actions_from_text_multi_intent_message():
+    text = "добавь 3 мотка ниток белых и что там по поводу поролона, когда придет?"
+    result = llm_intent_router.parse_actions_from_text(text)
+
+    assert len(result.actions) >= 2
+    add_action = next(a for a in result.actions if a.type == "ADD_ITEM")
+    eta_action = next(a for a in result.actions if a.type == "ASK_STOCK_ETA")
+
+    assert add_action.qty == 3
+    assert "нит" in (add_action.query_core or "")
+    assert "бел" in (add_action.query_core or "")
+    assert "поролон" in (eta_action.query_core or "")
+
+
+def test_parse_actions_heuristic_adds_eta_when_llm_unknown():
+    text = "что там по поводу поролона, когда придет?"
+    result = llm_intent_router.parse_actions_from_text(
+        text,
+        llm_payload='{"actions":[{"type":"UNKNOWN"}]}'
+    )
+
+    assert any(action.type == "ASK_STOCK_ETA" for action in result.actions)
+
+
 def test_route_message_llm_actions(monkeypatch):
     async def fake_chat(messages, temperature=0.2):
         return (
-            '{"actions":[{"type":"ADD_ITEM","query_core":"нитка белая","qty":3,"unit":"моток"},'
-            '{"type":"ASK_STOCK_ETA","query_core":"поролон"}]}'
+            '[{"type":"ADD_ITEM","query_core":"нитки белые","qty":3,"unit":"моток"},'
+            '{"type":"ASK_STOCK_ETA","query_core":"поролон"}]'
         )
 
     monkeypatch.setattr(llm_intent_router, "llm_available", lambda: True)

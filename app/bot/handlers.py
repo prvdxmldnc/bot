@@ -661,13 +661,15 @@ async def handle_text_order(message: Message) -> None:
                     limit=5,
                 )
                 stage_candidates = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
+                qty = action.get("qty")
+                qty_suffix = f" (qty: {int(qty) if isinstance(qty, (int, float)) else qty})" if qty else ""
                 if stage_candidates:
                     top = stage_candidates[0]
                     lines.append(
-                        f"{idx}. {action_query} → {top.get('title_ru')} (SKU: {top.get('sku')})"
+                        f"{idx}. {action_query}{qty_suffix} → {top.get('title_ru')} (SKU: {top.get('sku')})"
                     )
                 else:
-                    lines.append(f"{idx}. {action_query} → не нашли, передали менеджеру")
+                    lines.append(f"{idx}. {action_query}{qty_suffix} → не нашли, уточни товар/артикул")
             if eta_actions:
                 eta_query = str(eta_actions[0].get("query_core") or "").strip()
                 lines.append(await get_stock_eta(eta_query))
