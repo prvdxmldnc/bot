@@ -180,6 +180,7 @@ async def debug_search_as(request: Request) -> HTMLResponse:
             "batch_results": [],
             "selected_user": None,
             "selected_org": None,
+            "offset": 0,
         },
     )
 
@@ -192,6 +193,7 @@ async def debug_search_as_post(
     phone: Annotated[str | None, Form()] = None,
     query: Annotated[str | None, Form()] = None,
     batch: Annotated[str | None, Form()] = None,
+    offset: Annotated[int, Form()] = 0,
 ) -> HTMLResponse:
     resolved_org_id: int | None = None
     resolved_user_id: int | None = None
@@ -243,6 +245,7 @@ async def debug_search_as_post(
                     user_id=resolved_user_id,
                     text=line,
                     limit=5,
+                    clarify_offset=offset,
                 )
                 batch_results.append(
                     {
@@ -259,6 +262,7 @@ async def debug_search_as_post(
                 user_id=resolved_user_id,
                 text=query.strip(),
                 limit=5,
+                clarify_offset=offset,
             )
             results = payload["results"]
             decision = payload["decision"]
@@ -279,5 +283,6 @@ async def debug_search_as_post(
             "batch_results": batch_results,
             "selected_user": selected_user,
             "selected_org": selected_org,
+            "offset": offset,
         },
     )

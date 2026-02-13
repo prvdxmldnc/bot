@@ -36,6 +36,7 @@
   <form action="/admin/debug/search-as" method="post">
     <input type="hidden" name="org_id" value="{{ org_id }}" />
     <input type="hidden" name="phone" value="{{ phone }}" />
+    <input type="hidden" name="offset" value="{{ offset or 0 }}" />
     <input type="text" name="query" value="{{ query }}" placeholder="Введите запрос" size="60" />
     <button type="submit">Проверить</button>
   </form>
@@ -44,6 +45,7 @@
   <form action="/admin/debug/search-as" method="post">
     <input type="hidden" name="org_id" value="{{ org_id }}" />
     <input type="hidden" name="phone" value="{{ phone }}" />
+    <input type="hidden" name="offset" value="{{ offset or 0 }}" />
     <textarea name="batch" rows="6" cols="80" placeholder="Каждый запрос на новой строке">{{ batch }}</textarea>
     <br />
     <button type="submit">Проверить пакет</button>
@@ -89,6 +91,28 @@
           <li>{{ option.label }} — <code>{{ option.apply | tojson }}</code></li>
         {% endfor %}
       </ul>
+      <p>Показано {{ decision.clarification.options|length }} из {{ decision.clarification.total }} (offset={{ decision.clarification.offset }})</p>
+      <div>
+        {% if decision.clarification.prev_offset is not none %}
+          <form action="/admin/debug/search-as" method="post" style="display:inline-block;">
+            <input type="hidden" name="org_id" value="{{ org_id }}" />
+            <input type="hidden" name="phone" value="{{ phone }}" />
+            <input type="hidden" name="query" value="{{ query }}" />
+            <input type="hidden" name="offset" value="{{ decision.clarification.prev_offset }}" />
+            <button type="submit">⬅️ Prev</button>
+          </form>
+        {% endif %}
+        {% if decision.clarification.next_offset is not none %}
+          <form action="/admin/debug/search-as" method="post" style="display:inline-block; margin-left:8px;">
+            <input type="hidden" name="org_id" value="{{ org_id }}" />
+            <input type="hidden" name="phone" value="{{ phone }}" />
+            <input type="hidden" name="query" value="{{ query }}" />
+            <input type="hidden" name="offset" value="{{ decision.clarification.next_offset }}" />
+            <button type="submit">Next ➡️</button>
+          </form>
+        {% endif %}
+      </div>
+
     {% endif %}
     <h3>Stages</h3>
     <ul>

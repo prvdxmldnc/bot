@@ -11,7 +11,7 @@ from app.models import OrgMember, Product
 from app.request_handler import handle_message
 from app.request_handler.types import DialogContext
 from app.services.history_candidates import count_org_candidates, search_history_products
-from app.services.clarify import build_clarification, history_suggestions
+from app.services.clarify import build_clarification, extract_head_token, history_suggestions
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_client import llm_available
 from app.services.llm_normalize import suggest_queries
@@ -82,6 +82,30 @@ _COLOR_TOKEN_MAP = {
     "бежевая": "бежев",
 }
 _ADJ_ENDINGS = ("ая", "яя", "ый", "ий", "ое", "ее", "ые", "ие", "ого", "ему", "ым", "ой", "ую", "юю")
+
+_TOKEN_SYNONYMS = {
+    "спандбонд": "спанбонд",
+    "спандбон": "спанбонд",
+    "синтепонн": "синтепон",
+}
+
+
+def apply_token_synonyms(text: str) -> tuple[str, dict[str, str]]:
+    tokens = _TOKEN_RE.findall(normalize_query_text(text or ""))
+    if not tokens:
+        return (text or "").strip(), {}
+    mapped: list[str] = []
+    applied: dict[str, str] = {}
+    anchor_tokens = [t for t in tokens if len(t) >= 4 and not t.isdigit()]
+    for token in tokens:
+        repl = _TOKEN_SYNONYMS.get(token, token)
+        if token == "ппу":
+            if len(anchor_tokens) <= 2:
+                repl = "поролон"
+        if repl != token:
+            applied[token] = repl
+        mapped.append(repl)
+    return " ".join(mapped).strip(), applied
 
 
 def _fallback_query(parsed_items: list[dict[str, Any]]) -> str:
@@ -279,6 +303,7 @@ async def run_search_pipeline(
     enable_llm_narrow: bool = True,
     enable_llm_rewrite: bool = True,
     enable_rerank: bool = True,
+    clarify_offset: int = 0,
 ) -> dict[str, Any]:
     parsed_items = parse_order_text(text)
     if len(parsed_items) > 1:
@@ -296,6 +321,7 @@ async def run_search_pipeline(
                 enable_llm_narrow=enable_llm_narrow,
                 enable_llm_rewrite=enable_llm_rewrite,
                 enable_rerank=enable_rerank,
+                clarify_offset=clarify_offset,
             )
             item_payloads.append(
                 {
@@ -338,6 +364,11 @@ async def run_search_pipeline(
     alias_used = False
     alias_query_used: str | None = None
     alias_candidates_found = 0
+
+    synonym_retry_attempted = False
+    synonym_map: dict[str, str] = {}
+    synonym_retry_query: str | None = None
+    synonym_retry_results_count = 0
 
     candidates: list[dict[str, Any]] = []
     trace_by_name: dict[str, dict[str, Any]] = {}
@@ -534,26 +565,80 @@ async def run_search_pipeline(
     )
     trace_by_name["llm_rewrite"] = llm_rewrite_stage
 
+    synonym_before = len(candidates)
+    synonym_note = "skipped: already have candidates"
+    if not candidates:
+        synonym_retry_attempted = True
+        synonym_retry_query, synonym_map = apply_token_synonyms(search_query or text)
+        if synonym_map and synonym_retry_query and synonym_retry_query != (search_query or text):
+            synonym_results = await search_products(session, synonym_retry_query, limit=limit)
+            synonym_retry_results_count = len(synonym_results)
+            if synonym_results:
+                candidates = synonym_results
+                synonym_note = "synonym retry matched"
+            else:
+                synonym_note = "synonym retry returned 0"
+        else:
+            synonym_note = "synonym retry no changes"
+
+    trace_by_name["synonym_retry"] = _stage_entry(
+        name="synonym_retry",
+        query_used=synonym_retry_query or search_query,
+        tokens_used=_extract_trace_tokens_numbers(synonym_retry_query or search_query)[0],
+        numbers_used=_extract_trace_tokens_numbers(synonym_retry_query or search_query)[1],
+        candidates_before=synonym_before,
+        candidates_after=len(candidates),
+        top_candidates=candidates,
+        notes=synonym_note,
+    )
+    trace_by_name["synonym_retry"].update({
+        "synonyms_applied": bool(synonym_map),
+        "synonym_map": synonym_map,
+        "query_retry": synonym_retry_query,
+        "retry_results_count": synonym_retry_results_count,
+    })
+
     clarification = None
     clarify_reason = "skipped"
-    if history_org_id and not candidates:
-        key_token = None
-        for token in _extract_trace_tokens_numbers(search_query or text)[0]:
-            if len(token) >= 4 and not token.isdigit():
-                key_token = token
-                break
-        history_top = await history_suggestions(session, history_org_id, key_token or "", limit=6) if key_token else []
-        clarification = build_clarification(query_core=search_query, candidates=candidates, history_top_titles=history_top)
+    clarification_pool: list[dict[str, Any]] = []
+    if not candidates:
+        head_token = extract_head_token(search_query or text)
+        if history_org_id and head_token:
+            clarification_pool = await history_suggestions(session, history_org_id, head_token, limit=60)
+        if not clarification_pool and head_token:
+            global_suggestions = await search_products(session, head_token, limit=60)
+            clarification_pool = [
+                {"product_id": item.get("id"), "title": item.get("title_ru")}
+                for item in global_suggestions
+                if item.get("title_ru")
+            ]
+        clarification = build_clarification(
+            query_core=search_query or text,
+            reason="no_candidates",
+            suggestions=clarification_pool,
+            offset=clarify_offset,
+            page_size=10,
+        )
         if clarification:
-            clarify_reason = clarification.get("reason") or "needs_clarification"
+            clarify_reason = clarification.get("reason") or "no_candidates"
 
-    if candidates:
-        maybe_clarification = build_clarification(query_core=search_query, candidates=candidates)
-        if maybe_clarification and (len(candidates) > 8 or maybe_clarification.get("reason") in {"ambiguous_facets", "ambiguous_clusters"}):
-            clarification = maybe_clarification
-            clarify_reason = clarification.get("reason") or "needs_clarification"
+    if candidates and len(candidates) > 30:
+        clarification_pool = [
+            {"product_id": item.get("id"), "title": item.get("title_ru")}
+            for item in candidates
+            if item.get("title_ru")
+        ]
+        clarification = build_clarification(
+            query_core=search_query or text,
+            reason="too_many",
+            suggestions=clarification_pool,
+            offset=clarify_offset,
+            page_size=10,
+        )
+        if clarification:
+            clarify_reason = clarification.get("reason") or "too_many"
 
-    if clarification:
+    if clarification and (not candidates or len(candidates) > 30):
         decision = "needs_clarification"
         llm_reason = clarify_reason
         if not candidates:
@@ -600,6 +685,8 @@ async def run_search_pipeline(
             "top5_titles": [str(item.get("title_ru") or "") for item in candidates[:5]],
             "notes": clarify_reason,
             "options_count": len(clarification.get("options") or []),
+            "clarify_total": clarification.get("total"),
+            "clarify_offset": clarification.get("offset"),
         }
         trace = {
             "input": {
@@ -614,16 +701,21 @@ async def run_search_pipeline(
             "candidates_count_before_llm": len(candidates),
             "llm_called": False,
             "llm_stage": "none",
+            "synonym_retry_attempted": synonym_retry_attempted,
+            "synonym_map": synonym_map,
             "stages": [
                 trace_by_name.get("history"),
                 trace_by_name.get("alias"),
                 trace_by_name.get("local"),
+                trace_by_name.get("synonym_retry"),
                 trace_by_name.get("clarify"),
             ],
             "clarify": {
                 "reason": clarify_reason,
                 "options_count": len(clarification.get("options") or []),
                 "selected_facet": None,
+                "clarify_total": clarification.get("total"),
+                "clarify_offset": clarification.get("offset"),
             },
         }
         return {"results": candidates[:limit], "decision": decision_payload, "trace": trace}
@@ -823,6 +915,8 @@ async def run_search_pipeline(
         "candidates_count_before_llm": candidates_count_before_llm,
         "llm_called": llm_called,
         "llm_stage": llm_stage,
+        "synonym_retry_attempted": synonym_retry_attempted,
+        "synonym_map": synonym_map,
         "stages": [
             trace_by_name.get("history"),
             trace_by_name.get("alias"),

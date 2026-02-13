@@ -128,11 +128,23 @@ def _alias_keyboard(titles: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _clarify_keyboard(options: list[dict[str, object]]) -> InlineKeyboardMarkup:
+def _clarify_keyboard(clarification: dict[str, object]) -> InlineKeyboardMarkup:
+    options = clarification.get("options") if isinstance(clarification, dict) else []
     rows = []
-    for idx, option in enumerate(options[:6], start=1):
-        label = str(option.get("label") or f"Вариант {idx}")
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"clarify:{idx}")])
+    for idx, option in enumerate((options or [])[:10], start=1):
+        label = str((option or {}).get("label") or f"Вариант {idx}")
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"clarify:choose:{idx}")])
+
+    nav_row = []
+    prev_offset = clarification.get("prev_offset") if isinstance(clarification, dict) else None
+    next_offset = clarification.get("next_offset") if isinstance(clarification, dict) else None
+    if isinstance(prev_offset, int):
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"clarify:prev:{prev_offset}"))
+    if isinstance(next_offset, int):
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"clarify:next:{next_offset}"))
+    if nav_row:
+        rows.append(nav_row)
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -235,9 +247,14 @@ async def alias_confirm(callback: CallbackQuery) -> None:
 async def clarify_choice(callback: CallbackQuery) -> None:
     if not callback.message:
         return
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Не удалось обработать выбор.")
+        return
+    action = parts[1]
     try:
-        choice_index = int(callback.data.split(":", 1)[1]) - 1
-    except (ValueError, IndexError):
+        value = int(parts[2])
+    except ValueError:
         await callback.answer("Не удалось обработать выбор.")
         return
 
@@ -253,7 +270,49 @@ async def clarify_choice(callback: CallbackQuery) -> None:
         return
 
     payload = json.loads(cached)
-    options = payload.get("options") or []
+    base_query = str(payload.get("base_query") or "")
+    org_id = payload.get("org_id")
+    user_id = payload.get("user_id")
+
+    if action in {"next", "prev"}:
+        async with get_session_context() as session:
+            pipeline_result = await run_search_pipeline(
+                session,
+                org_id=org_id if isinstance(org_id, int) else None,
+                user_id=user_id if isinstance(user_id, int) else None,
+                text=base_query,
+                limit=5,
+                enable_llm_narrow=False,
+                enable_llm_rewrite=False,
+                enable_rerank=False,
+                clarify_offset=value,
+            )
+        decision_payload = pipeline_result.get("decision", {}) if isinstance(pipeline_result, dict) else {}
+        clarification = decision_payload.get("clarification") if isinstance(decision_payload, dict) else None
+        if isinstance(clarification, dict):
+            question = str(clarification.get("question") or "Уточни вариант:")
+            await callback.message.edit_text(question, reply_markup=_clarify_keyboard(clarification))
+            await redis_client.setex(
+                cache_key,
+                _CANDIDATES_TTL_SECONDS,
+                json.dumps(
+                    {
+                        "org_id": org_id,
+                        "user_id": user_id,
+                        "base_query": base_query,
+                        "clarification": clarification,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            await callback.answer()
+            return
+        await callback.answer("Больше вариантов нет.")
+        return
+
+    choice_index = value - 1
+    clarification = payload.get("clarification") or {}
+    options = clarification.get("options") if isinstance(clarification, dict) else []
     if not isinstance(options, list) or choice_index < 0 or choice_index >= len(options):
         await callback.answer("Вариант недоступен.")
         return
@@ -262,10 +321,7 @@ async def clarify_choice(callback: CallbackQuery) -> None:
     apply = option.get("apply") if isinstance(option, dict) else {}
     apply = apply if isinstance(apply, dict) else {}
     append_tokens = apply.get("append_tokens") if isinstance(apply.get("append_tokens"), list) else []
-    base_query = str(payload.get("base_query") or "")
     next_query = _apply_clarification_tokens(base_query, append_tokens)
-    org_id = payload.get("org_id")
-    user_id = payload.get("user_id")
 
     async with get_session_context() as session:
         pipeline_result = await run_search_pipeline(
@@ -281,9 +337,9 @@ async def clarify_choice(callback: CallbackQuery) -> None:
     results = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
     if results:
         lines = [f"{idx}. {item.get('title_ru')} (SKU: {item.get('sku')})" for idx, item in enumerate(results, start=1)]
-        await callback.message.answer("Вот что нашлось:\n" + "\n".join(lines))
+        await callback.message.edit_text("Вот что нашлось:\n" + "\n".join(lines))
     else:
-        await callback.message.answer("Не нашёл, уточни товар/артикул (можно размер/цвет/тип).")
+        await callback.message.edit_text("Не нашёл, уточни товар/артикул (можно размер/цвет/тип).")
     await callback.answer()
 
 
@@ -751,7 +807,7 @@ async def handle_text_order(message: Message) -> None:
                     question = str(clarification.get("question") or "Уточни вариант:")
                     options = clarification.get("options") or []
                     if isinstance(options, list) and options:
-                        sent = await message.answer(question, reply_markup=_clarify_keyboard(options))
+                        sent = await message.answer(question, reply_markup=_clarify_keyboard(clarification))
                         redis_client = _redis_client()
                         if redis_client:
                             cache_key = _candidate_cache_key(message.from_user.id, sent.message_id)
@@ -763,7 +819,7 @@ async def handle_text_order(message: Message) -> None:
                                         "org_id": decision_payload.get("history_org_id"),
                                         "user_id": user.id,
                                         "base_query": action_query,
-                                        "options": options,
+                                        "clarification": clarification,
                                     },
                                     ensure_ascii=False,
                                 ),

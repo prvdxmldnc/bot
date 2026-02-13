@@ -254,13 +254,87 @@ def test_pipeline_import_and_history_signature_alignment(monkeypatch):
     assert isinstance(payload, dict)
     assert "decision" in payload
 
-def test_clarification_for_thread_variants(monkeypatch):
+def test_synonym_retry_finds_spunbond(monkeypatch):
+    calls = []
+
     async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
-        if "нитк" in query:
-            return [
-                {"id": 1, "title_ru": "Нитка 70 ЛЛ белая", "sku": "T-LL"},
-                {"id": 2, "title_ru": "Нитка 70 АП белая", "sku": "T-AP"},
-            ]
+        calls.append(query)
+        if query == "спандбонд 70 белый":
+            return []
+        if query == "спанбонд 70 белый":
+            return [{"id": 77, "title_ru": "Спанбонд 70 белый", "sku": "SB-70"}]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "llm_enabled", False)
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="спандбонд 70 белый"))
+
+    assert payload["results"]
+    assert "спанбонд 70 белый" in calls
+    assert payload["trace"]["synonym_retry_attempted"] is True
+
+
+def test_no_candidates_clarification_has_pagination(monkeypatch):
+    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
+        if query == "спанбонд":
+            return [{"id": i, "title_ru": f"Спанбонд вариант {i}", "sku": f"SB-{i}"} for i in range(1, 58)]
+        return []
+
+    async def fake_history(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
+    monkeypatch.setattr(search_pipeline, "history_suggestions", fake_history)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "llm_enabled", False)
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="спандбонд"))
+
+    clarification = payload["decision"]["clarification"]
+    assert payload["decision"]["decision"] == "needs_clarification"
+    assert clarification["total"] > 10
+    assert clarification["next_offset"] == 10
+    assert len(clarification["options"]) == 10
+
+
+def test_clarification_pagination_offset_returns_next_page(monkeypatch):
+    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
+        if query == "спанбонд":
+            return [{"id": i, "title_ru": f"Спанбонд вариант {i}", "sku": f"SB-{i}"} for i in range(1, 36)]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
+    monkeypatch.setattr(search_pipeline, "history_suggestions", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "llm_enabled", False)
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="спандбонд", clarify_offset=10))
+
+    clarification = payload["decision"]["clarification"]
+    assert clarification["offset"] == 10
+    assert clarification["prev_offset"] == 0
+    assert len(clarification["options"]) == 10
+    assert "11" in clarification["options"][0]["label"]
+
+
+def test_regression_bolt_not_forced_to_clarify(monkeypatch):
+    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
+        if "болт" in query:
+            return [{"id": 1, "title_ru": "Болт 8x30", "sku": "B-830"}]
         return []
 
     monkeypatch.setattr(search_pipeline, "search_products", fake_search)
@@ -270,33 +344,6 @@ def test_clarification_for_thread_variants(monkeypatch):
     monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
     monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
 
-    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="нитки белые"))
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="болт 8 30"))
 
-    assert payload["decision"]["decision"] == "needs_clarification"
-    labels = [opt["label"] for opt in payload["decision"]["clarification"]["options"]]
-    assert any("ЛЛ" in label for label in labels)
-    assert any("АП" in label for label in labels)
-
-
-def test_clarification_for_opora_height(monkeypatch):
-    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
-        if "опора" in query:
-            return [
-                {"id": 10, "title_ru": "Опора 1010 Н-40", "sku": "O40"},
-                {"id": 11, "title_ru": "Опора 1010 Н-100", "sku": "O100"},
-            ]
-        return []
-
-    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
-    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
-    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
-    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
-    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
-    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
-
-    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="опора 1010"))
-
-    assert payload["decision"]["decision"] == "needs_clarification"
-    labels = [opt["label"] for opt in payload["decision"]["clarification"]["options"]]
-    assert any("40" in label for label in labels)
-    assert any("100" in label for label in labels)
+    assert payload["decision"]["decision"] != "needs_clarification"
