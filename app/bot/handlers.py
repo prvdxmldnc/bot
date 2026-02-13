@@ -128,6 +128,22 @@ def _alias_keyboard(titles: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _clarify_keyboard(options: list[dict[str, object]]) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, option in enumerate(options[:6], start=1):
+        label = str(option.get("label") or f"Вариант {idx}")
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"clarify:{idx}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _apply_clarification_tokens(base_query: str, append_tokens: list[str] | None) -> str:
+    query = (base_query or "").strip()
+    extra = [str(token).strip() for token in (append_tokens or []) if str(token).strip()]
+    if not extra:
+        return query
+    return " ".join([query, *extra]).strip()
+
+
 async def _handle_auth_interrupts(message: Message, state: FSMContext) -> bool:
     if _is_login_command(message):
         await login_start(message, state)
@@ -213,6 +229,62 @@ async def alias_confirm(callback: CallbackQuery) -> None:
         await upsert_org_alias(session, org_id, alias_text, product_id)
         await session.commit()
     await callback.answer("Запомнил. В следующий раз буду понимать быстрее.")
+
+
+@router.callback_query(F.data.startswith("clarify:"))
+async def clarify_choice(callback: CallbackQuery) -> None:
+    if not callback.message:
+        return
+    try:
+        choice_index = int(callback.data.split(":", 1)[1]) - 1
+    except (ValueError, IndexError):
+        await callback.answer("Не удалось обработать выбор.")
+        return
+
+    redis_client = _redis_client()
+    if not redis_client:
+        await callback.answer("Контекст недоступен.")
+        return
+
+    cache_key = _candidate_cache_key(callback.from_user.id, callback.message.message_id)
+    cached = await redis_client.get(cache_key)
+    if not cached:
+        await callback.answer("Контекст устарел.")
+        return
+
+    payload = json.loads(cached)
+    options = payload.get("options") or []
+    if not isinstance(options, list) or choice_index < 0 or choice_index >= len(options):
+        await callback.answer("Вариант недоступен.")
+        return
+
+    option = options[choice_index] or {}
+    apply = option.get("apply") if isinstance(option, dict) else {}
+    apply = apply if isinstance(apply, dict) else {}
+    append_tokens = apply.get("append_tokens") if isinstance(apply.get("append_tokens"), list) else []
+    base_query = str(payload.get("base_query") or "")
+    next_query = _apply_clarification_tokens(base_query, append_tokens)
+    org_id = payload.get("org_id")
+    user_id = payload.get("user_id")
+
+    async with get_session_context() as session:
+        pipeline_result = await run_search_pipeline(
+            session,
+            org_id=org_id if isinstance(org_id, int) else None,
+            user_id=user_id if isinstance(user_id, int) else None,
+            text=next_query,
+            limit=5,
+            enable_llm_narrow=False,
+            enable_llm_rewrite=False,
+            enable_rerank=False,
+        )
+    results = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
+    if results:
+        lines = [f"{idx}. {item.get('title_ru')} (SKU: {item.get('sku')})" for idx, item in enumerate(results, start=1)]
+        await callback.message.answer("Вот что нашлось:\n" + "\n".join(lines))
+    else:
+        await callback.message.answer("Не нашёл, уточни товар/артикул (можно размер/цвет/тип).")
+    await callback.answer()
 
 
 @router.message(StateFilter("*"), _is_registration_command)
@@ -664,13 +736,39 @@ async def handle_text_order(message: Message) -> None:
                     enable_rerank=False,
                 )
                 stage_candidates = pipeline_result.get("results", []) if isinstance(pipeline_result, dict) else []
+                decision_payload = pipeline_result.get("decision", {}) if isinstance(pipeline_result, dict) else {}
+                clarification = decision_payload.get("clarification") if isinstance(decision_payload, dict) else None
                 qty = action.get("qty")
-                qty_suffix = f" (qty: {int(qty) if isinstance(qty, (int, float)) else qty})" if qty else ""
+                unit = action.get("unit")
+                unit_suffix = f" {unit}" if isinstance(unit, str) and unit else ""
+                qty_suffix = f" (qty: {int(qty) if isinstance(qty, (int, float)) else qty}{unit_suffix})" if qty else ""
                 if stage_candidates:
                     top = stage_candidates[0]
                     lines.append(
                         f"{idx}. {action_query}{qty_suffix} → {top.get('title_ru')} (SKU: {top.get('sku')})"
                     )
+                elif isinstance(clarification, dict) and clarification.get("options"):
+                    question = str(clarification.get("question") or "Уточни вариант:")
+                    options = clarification.get("options") or []
+                    if isinstance(options, list) and options:
+                        sent = await message.answer(question, reply_markup=_clarify_keyboard(options))
+                        redis_client = _redis_client()
+                        if redis_client:
+                            cache_key = _candidate_cache_key(message.from_user.id, sent.message_id)
+                            await redis_client.setex(
+                                cache_key,
+                                _CANDIDATES_TTL_SECONDS,
+                                json.dumps(
+                                    {
+                                        "org_id": decision_payload.get("history_org_id"),
+                                        "user_id": user.id,
+                                        "base_query": action_query,
+                                        "options": options,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                    lines.append(f"{idx}. {action_query}{qty_suffix} → требуется уточнение")
                 else:
                     lines.append(f"{idx}. {action_query}{qty_suffix} → не нашли, уточни товар/артикул")
             if eta_actions:

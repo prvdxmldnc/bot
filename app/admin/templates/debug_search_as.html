@@ -49,6 +49,26 @@
     <button type="submit">Проверить пакет</button>
   </form>
 
+
+  {% if decision and decision.multi_item and trace %}
+    <h2>Результаты по позициям</h2>
+    {% set items = trace.items if trace and trace.items else [] %}
+    {% for entry in items %}
+      <details open>
+        <summary>Позиция {{ loop.index }} — {{ entry.query_core }} (qty={{ entry.item.qty }}, unit={{ entry.item.unit }})</summary>
+        <p>Decision: {{ entry.decision.decision if entry.decision else "" }}</p>
+        <ul>
+          {% for item in entry.results %}
+            <li>{{ item.title_ru }} (SKU: {{ item.sku }})</li>
+          {% endfor %}
+        </ul>
+        {% if entry.trace %}
+          <pre>{{ entry.trace | tojson(indent=2) }}</pre>
+        {% endif %}
+      </details>
+    {% endfor %}
+  {% endif %}
+
   {% if results %}
     <h2>Результаты</h2>
     <ul>
@@ -61,6 +81,15 @@
   {% if decision %}
     <h3>Decision payload</h3>
     <pre>{{ decision | tojson(indent=2) }}</pre>
+    {% if decision.decision == "needs_clarification" and decision.clarification %}
+      <h3>Clarification</h3>
+      <p><strong>{{ decision.clarification.question }}</strong> (reason: {{ decision.clarification.reason }})</p>
+      <ul>
+        {% for option in decision.clarification.options %}
+          <li>{{ option.label }} — <code>{{ option.apply | tojson }}</code></li>
+        {% endfor %}
+      </ul>
+    {% endif %}
     <h3>Stages</h3>
     <ul>
       <li>history_used: {{ decision.history_used }}</li>
@@ -93,13 +122,14 @@
             {% if stage.attempts %}
               <li>history_total_available: {{ stage.history_total_available }}</li>
               <li>limit_used: {{ stage.limit_used }}</li>
+              <li>attempt_query_used: {{ stage.attempt_query_used }}</li>
               <li>history_used: {{ stage.history_used }}</li>
               <li>top_titles: {{ stage.top_titles }}</li>
               <li>
                 attempts:
                 <ul>
                   {% for a in stage.attempts %}
-                    <li>limit={{ a.limit }}, candidates_count={{ a.candidates_count }}, found_results={{ a.found_results }}, note={{ a.note }}</li>
+                    <li>query_used={{ a.query_used }}, limit_used={{ a.limit_used }}, candidates_count={{ a.candidates_count }}, candidates_found={{ a.candidates_found }}, note={{ a.note }}</li>
                   {% endfor %}
                 </ul>
               </li>

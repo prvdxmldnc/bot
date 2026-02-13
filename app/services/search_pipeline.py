@@ -11,6 +11,7 @@ from app.models import OrgMember, Product
 from app.request_handler import handle_message
 from app.request_handler.types import DialogContext
 from app.services.history_candidates import count_org_candidates, search_history_products
+from app.services.clarify import build_clarification, history_suggestions
 from app.services.llm_category_narrow import narrow_categories
 from app.services.llm_client import llm_available
 from app.services.llm_normalize import suggest_queries
@@ -533,6 +534,100 @@ async def run_search_pipeline(
     )
     trace_by_name["llm_rewrite"] = llm_rewrite_stage
 
+    clarification = None
+    clarify_reason = "skipped"
+    if history_org_id and not candidates:
+        key_token = None
+        for token in _extract_trace_tokens_numbers(search_query or text)[0]:
+            if len(token) >= 4 and not token.isdigit():
+                key_token = token
+                break
+        history_top = await history_suggestions(session, history_org_id, key_token or "", limit=6) if key_token else []
+        clarification = build_clarification(query_core=search_query, candidates=candidates, history_top_titles=history_top)
+        if clarification:
+            clarify_reason = clarification.get("reason") or "needs_clarification"
+
+    if candidates:
+        maybe_clarification = build_clarification(query_core=search_query, candidates=candidates)
+        if maybe_clarification and (len(candidates) > 8 or maybe_clarification.get("reason") in {"ambiguous_facets", "ambiguous_clusters"}):
+            clarification = maybe_clarification
+            clarify_reason = clarification.get("reason") or "needs_clarification"
+
+    if clarification:
+        decision = "needs_clarification"
+        llm_reason = clarify_reason
+        if not candidates:
+            if not enable_llm_narrow:
+                llm_reason = "llm_narrow_disabled"
+            elif not llm_available():
+                llm_reason = "llm_disabled"
+
+        decision_payload = _decision_payload(
+            parsed_items=parsed_items,
+            original_query=search_query or text,
+            alternatives=[],
+            used_alternative=None,
+            candidates_count_final=len(candidates),
+            decision=decision,
+            history_org_id=history_org_id,
+            history_candidates_count=history_candidates_count,
+            history_used=history_used,
+            history_query_used=history_query_used,
+            history_candidates_found=history_candidates_found,
+            alias_candidates_count=alias_candidates_count,
+            alias_used=alias_used,
+            alias_query_used=alias_query_used,
+            alias_candidates_found=alias_candidates_found,
+            category_ids=[],
+            llm_narrow_confidence=None,
+            llm_narrow_reason=llm_reason,
+            narrowed_query=search_query,
+            rerank_best_ids=[],
+            rerank_top_score=None,
+        )
+        decision_payload["clarification"] = clarification
+        decision_payload["llm_called"] = False
+        decision_payload["llm_stage"] = "none"
+        trace_by_name["clarify"] = {
+            "name": "clarify",
+            "query_used": search_query,
+            "tokens_used": _extract_trace_tokens_numbers(search_query)[0],
+            "numbers_used": _extract_trace_tokens_numbers(search_query)[1],
+            "product_ids_filter_count": None,
+            "category_ids_filter": [],
+            "candidates_before": len(candidates),
+            "candidates_after": len(candidates),
+            "top5_titles": [str(item.get("title_ru") or "") for item in candidates[:5]],
+            "notes": clarify_reason,
+            "options_count": len(clarification.get("options") or []),
+        }
+        trace = {
+            "input": {
+                "raw_text": text,
+                "normalized_text": normalized_text,
+                "parsed_items": parsed_items,
+                "org_id": history_org_id,
+                "user_id": user_id,
+            },
+            "history_attempts": history_attempts,
+            "local_attempts": local_attempts,
+            "candidates_count_before_llm": len(candidates),
+            "llm_called": False,
+            "llm_stage": "none",
+            "stages": [
+                trace_by_name.get("history"),
+                trace_by_name.get("alias"),
+                trace_by_name.get("local"),
+                trace_by_name.get("clarify"),
+            ],
+            "clarify": {
+                "reason": clarify_reason,
+                "options_count": len(clarification.get("options") or []),
+                "selected_facet": None,
+            },
+        }
+        return {"results": candidates[:limit], "decision": decision_payload, "trace": trace}
+
     alternatives: list[str] = []
     used_alternative: str | None = None
     category_ids: list[int] = []
@@ -732,6 +827,7 @@ async def run_search_pipeline(
             trace_by_name.get("history"),
             trace_by_name.get("alias"),
             trace_by_name.get("local"),
+            trace_by_name.get("clarify"),
             trace_by_name.get("llm_rewrite"),
             trace_by_name.get("llm_narrow"),
             trace_by_name.get("rerank"),

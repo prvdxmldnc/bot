@@ -253,3 +253,50 @@ def test_pipeline_import_and_history_signature_alignment(monkeypatch):
 
     assert isinstance(payload, dict)
     assert "decision" in payload
+
+def test_clarification_for_thread_variants(monkeypatch):
+    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
+        if "нитк" in query:
+            return [
+                {"id": 1, "title_ru": "Нитка 70 ЛЛ белая", "sku": "T-LL"},
+                {"id": 2, "title_ru": "Нитка 70 АП белая", "sku": "T-AP"},
+            ]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="нитки белые"))
+
+    assert payload["decision"]["decision"] == "needs_clarification"
+    labels = [opt["label"] for opt in payload["decision"]["clarification"]["options"]]
+    assert any("ЛЛ" in label for label in labels)
+    assert any("АП" in label for label in labels)
+
+
+def test_clarification_for_opora_height(monkeypatch):
+    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
+        if "опора" in query:
+            return [
+                {"id": 10, "title_ru": "Опора 1010 Н-40", "sku": "O40"},
+                {"id": 11, "title_ru": "Опора 1010 Н-100", "sku": "O100"},
+            ]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="опора 1010"))
+
+    assert payload["decision"]["decision"] == "needs_clarification"
+    labels = [opt["label"] for opt in payload["decision"]["clarification"]["options"]]
+    assert any("40" in label for label in labels)
+    assert any("100" in label for label in labels)
