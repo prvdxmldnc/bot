@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Заказы</title>
+</head>
+<body>
+  <h1>Заказы</h1>
+  <ul>
+    {% for order in orders %}
+      <li>
+        #{{ order.id }} — {{ order.status }}
+        <form action="/admin/orders/{{ order.id }}/status" method="post" style="display:inline">
+          <input type="text" name="status" placeholder="новый статус" />
+          <button type="submit">Обновить</button>
+        </form>
+      </li>
+    {% else %}
+      <li>Заказов нет</li>
+    {% endfor %}
+  </ul>
+  <a href="/admin">Назад</a>
+</body>
+</html>
