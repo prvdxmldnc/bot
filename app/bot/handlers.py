@@ -56,6 +56,8 @@ from app.utils.security import hash_password, verify_password
 router = Router()
 logger = logging.getLogger(__name__)
 _CANDIDATES_TTL_SECONDS = 600
+_REQUEST_MODE_TTL_SECONDS = 60 * 60 * 24
+_REQUEST_MODE_MEM: dict[int, dict[str, object]] = {}
 
 
 def _normalized_text(message: Message) -> str:
@@ -136,6 +138,10 @@ def _results_anchor_key(tg_id: int) -> str:
     return f"tg:results_message:{tg_id}"
 
 
+def _request_mode_key(tg_id: int) -> str:
+    return f"tg:request_mode:{tg_id}"
+
+
 async def _get_debug_org_id(tg_id: int) -> int | None:
     client = _redis_client()
     if not client:
@@ -186,6 +192,242 @@ def _request_mode_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         rows.append([KeyboardButton(text="Сменить организацию")])
     rows.append([KeyboardButton(text="Выйти")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def _request_control_keyboard(data: dict[str, object], is_admin: bool = False) -> InlineKeyboardMarkup:
+    mode = str(data.get("mode") or "start")
+    selected_order_id = data.get("selected_order_id")
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    offset = int(data.get("items_page_offset") or 0)
+    expanded = bool(data.get("expanded"))
+    selected_idx = int(data.get("selected_item_index") or 0)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if mode == "choose_order":
+        orders = data.get("orders_page") if isinstance(data.get("orders_page"), list) else []
+        order_row = []
+        for order in orders[:5]:
+            if not isinstance(order, dict):
+                continue
+            oid = order.get("id")
+            if isinstance(oid, int):
+                order_row.append(InlineKeyboardButton(text=f"#{oid}", callback_data=f"rm:pick_order:{oid}"))
+        if order_row:
+            rows.append(order_row)
+        rows.append([
+            InlineKeyboardButton(text="◀ Назад", callback_data=f"rm:orders_prev:{max(0, offset-5)}"),
+            InlineKeyboardButton(text="Вперёд ▶", callback_data=f"rm:orders_next:{offset+5}"),
+        ])
+        rows.append([InlineKeyboardButton(text="Вернуться", callback_data="rm:orders_back")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if items:
+        page_items = items[offset: offset + 10]
+        item_row: list[InlineKeyboardButton] = []
+        for index, item in enumerate(page_items, start=offset + 1):
+            status = str((item or {}).get("status") or "needs_clarification")
+            icon = "✅" if status == "ok" else "❌"
+            if index - 1 == selected_idx:
+                icon = "🎯"
+            item_row.append(InlineKeyboardButton(text=f"{index}{icon}", callback_data=f"rm:item:{index-1}"))
+            if len(item_row) == 5:
+                rows.append(item_row)
+                item_row = []
+        if item_row:
+            rows.append(item_row)
+        if len(items) > 10:
+            rows.append([
+                InlineKeyboardButton(text="◀", callback_data=f"rm:items_prev:{max(0, offset-10)}"),
+                InlineKeyboardButton(text="▶", callback_data=f"rm:items_next:{offset+10}"),
+            ])
+
+    if mode in {"draft", "review"}:
+        add_label = f"Добавить в заказ №{selected_order_id}" if isinstance(selected_order_id, int) else "Добавить в заказ"
+        rows.append([InlineKeyboardButton(text=add_label, callback_data="rm:choose_order")])
+        rows.append([InlineKeyboardButton(text="Подтвердить распознанное", callback_data="rm:confirm")])
+        rows.append([
+            InlineKeyboardButton(text="Отменить запрос", callback_data="rm:cancel"),
+            InlineKeyboardButton(text="Передать всё менеджеру", callback_data="rm:manager"),
+        ])
+        toggle = "Разбор нераспознанных ▲" if expanded else "Разбор нераспознанных ▾"
+        rows.append([InlineKeyboardButton(text=toggle, callback_data="rm:toggle_expand")])
+
+        if expanded and items:
+            current = items[selected_idx] if 0 <= selected_idx < len(items) else None
+            clarification = (current or {}).get("clarification") if isinstance(current, dict) else None
+            if isinstance(clarification, dict):
+                opts = clarification.get("options") if isinstance(clarification.get("options"), list) else []
+                for option in opts[:10]:
+                    if not isinstance(option, dict):
+                        continue
+                    oid = option.get("id")
+                    label = str(option.get("label") or "Вариант")
+                    if oid:
+                        rows.append([InlineKeyboardButton(text=label, callback_data=f"rm:clarify_choose:{oid}")])
+                prev_offset = clarification.get("prev_offset")
+                next_offset = clarification.get("next_offset")
+                nav = []
+                if isinstance(prev_offset, int):
+                    nav.append(InlineKeyboardButton(text="◀", callback_data=f"rm:clarify_prev:{prev_offset}"))
+                if isinstance(next_offset, int):
+                    nav.append(InlineKeyboardButton(text="▶", callback_data=f"rm:clarify_next:{next_offset}"))
+                if nav:
+                    rows.append(nav)
+            rows.append([
+                InlineKeyboardButton(text="Нет в списке", callback_data="rm:clarify_none"),
+                InlineKeyboardButton(text="Пропустить", callback_data="rm:clarify_skip"),
+            ])
+    else:
+        rows.append([
+            InlineKeyboardButton(text="Создать новую заявку", callback_data="rm:new"),
+            InlineKeyboardButton(text="Добавить в заказ", callback_data="rm:choose_order"),
+        ])
+        if is_admin:
+            rows.append([InlineKeyboardButton(text="Сменить организацию", callback_data="rm:change_org")])
+        rows.append([InlineKeyboardButton(text="Выйти", callback_data="rm:exit")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _request_results_text(data: dict[str, object]) -> str:
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    if not items:
+        return "Пока нет позиций."
+    lines = ["Результаты:"]
+    for idx, item in enumerate(items[:10], start=1):
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("raw") or "").strip()
+        qty = item.get("qty")
+        unit = str(item.get("unit") or "").strip()
+        qty_part = f" {qty} {unit}".strip() if qty else ""
+        status = str(item.get("status") or "needs_clarification")
+        icon = "✅" if status == "ok" else ("⏳" if status == "question" else "❌")
+        best = str(item.get("result_title") or "требуется уточнение")
+        lines.append(f"{icon} {idx}) {raw}{(' ' + qty_part) if qty_part else ''} → {best}")
+    if len(items) > 10:
+        lines.append(f"…и ещё {len(items) - 10}")
+    questions = data.get("questions") if isinstance(data.get("questions"), list) else []
+    if questions:
+        lines.append("\n❓ Вопросы:")
+        for q in questions[:3]:
+            lines.append(f"• {q} — уточняю")
+    return "\n".join(lines)
+
+
+def _request_control_text(data: dict[str, object]) -> str:
+    mode = str(data.get("mode") or "start")
+    status = str(data.get("status") or "Статус: ожидаю сообщение…")
+    selected_order_id = data.get("selected_order_id")
+    base = []
+    if mode == "start":
+        base = [
+            "Отправьте заявку/список (позиция + количество) или задайте вопрос.",
+            "Пример:",
+            "Молния беж 5 шт",
+            "Опора 1010 H40 3 шт",
+        ]
+    elif mode == "choose_order":
+        base = ["Выберите заказ для добавления распознанных позиций."]
+    else:
+        order_text = f"№{selected_order_id}" if isinstance(selected_order_id, int) else "не выбран"
+        base = [
+            "Распознал некоторые позиции автоматически.",
+            "Проверьте: нажмите номер, если неверно.",
+            f"Заказ: {order_text}",
+        ]
+    if bool(data.get("expanded")):
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        idx = int(data.get("selected_item_index") or 0)
+        if 0 <= idx < len(items) and isinstance(items[idx], dict):
+            raw = str(items[idx].get("raw") or "")
+            clar = items[idx].get("clarification") if isinstance(items[idx].get("clarification"), dict) else {}
+            offset = int(clar.get("offset") or 0)
+            total = int(clar.get("total") or 0)
+            page = (offset // 10) + 1 if total else 1
+            pages = (total + 9) // 10 if total else 1
+            base.append(f"Уточнение по позиции #{idx + 1}: '{raw}'")
+            base.append(f"Выберите вариант (страница {page}/{pages})")
+    base.append(status)
+    return "\n".join(base)
+
+
+def _default_request_state(org_id: int | None) -> dict[str, object]:
+    return {
+        "control_msg_id": None,
+        "results_msg_id": None,
+        "org_id_effective": org_id,
+        "selected_order_id": None,
+        "last_request_text": "",
+        "items": [],
+        "selected_item_index": 0,
+        "items_page_offset": 0,
+        "clarify_page_offset": 0,
+        "expanded": False,
+        "mode": "start",
+        "status": "Статус: ожидаю сообщение…",
+        "questions": [],
+        "orders_offset": 0,
+        "orders_page": [],
+    }
+
+
+async def _load_request_state(tg_id: int, org_id: int | None) -> dict[str, object]:
+    client = _redis_client()
+    if client:
+        raw = await client.get(_request_mode_key(tg_id))
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    if org_id is not None:
+                        data["org_id_effective"] = org_id
+                    return data
+            except Exception:
+                logger.warning("Failed to decode request mode state", exc_info=True)
+    data = _REQUEST_MODE_MEM.get(tg_id)
+    if isinstance(data, dict):
+        if org_id is not None:
+            data["org_id_effective"] = org_id
+        return data
+    return _default_request_state(org_id)
+
+
+async def _save_request_state(tg_id: int, data: dict[str, object]) -> None:
+    client = _redis_client()
+    if client:
+        await client.setex(_request_mode_key(tg_id), _REQUEST_MODE_TTL_SECONDS, json.dumps(data, ensure_ascii=False))
+    _REQUEST_MODE_MEM[tg_id] = data
+
+
+async def _edit_card(message: Message, msg_id: int | None, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> int:
+    if isinstance(msg_id, int):
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return msg_id
+        except Exception:
+            logger.info("Card edit failed, sending new message", exc_info=True)
+    sent = await message.answer(text, reply_markup=reply_markup)
+    return sent.message_id
+
+
+async def _render_request_cards(message: Message, data: dict[str, object], is_admin: bool = False) -> dict[str, object]:
+    results_id = await _edit_card(message, data.get("results_msg_id"), _request_results_text(data))
+    control_id = await _edit_card(
+        message,
+        data.get("control_msg_id"),
+        _request_control_text(data),
+        reply_markup=_request_control_keyboard(data, is_admin=is_admin),
+    )
+    data["results_msg_id"] = results_id
+    data["control_msg_id"] = control_id
+    await _save_request_state(message.from_user.id, data)
+    return data
 
 
 
@@ -930,10 +1172,16 @@ async def account(message: Message) -> None:
 async def request_mode_start(message: Message, state: FSMContext) -> None:
     is_admin = _is_admin_tg_id(message.from_user.id)
     await state.set_state(RequestStates.awaiting_text)
-    await message.answer(
-        "Отправьте заявку или список. Можно создать новую заявку или добавить в заказ.",
-        reply_markup=_request_mode_keyboard(is_admin),
-    )
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, message.from_user.id)
+        org_id = await _resolve_org_for_user(session, message.from_user.id, user)
+    data = await _load_request_state(message.from_user.id, org_id)
+    data["mode"] = "start"
+    data["status"] = "Статус: ожидаю сообщение…"
+    data["expanded"] = False
+    data["items"] = []
+    await _render_request_cards(message, data, is_admin=is_admin)
+    await message.answer("Режим заявки активирован.", reply_markup=_request_mode_keyboard(is_admin))
 
 
 @router.message(RequestStates.awaiting_text, F.text == "Сменить организацию")
@@ -944,6 +1192,8 @@ async def request_mode_change_org(message: Message, state: FSMContext) -> None:
 @router.message(RequestStates.awaiting_text, F.text == "Выйти")
 async def request_mode_exit(message: Message, state: FSMContext) -> None:
     await state.clear()
+    data = _default_request_state(None)
+    await _save_request_state(message.from_user.id, data)
     await message.answer("Режим заявки завершен.", reply_markup=main_menu_keyboard())
 
 
@@ -955,12 +1205,226 @@ async def request_mode_add_to_order(message: Message) -> None:
             await message.answer("Сначала выполните вход.")
             return
         orders = await list_orders_for_user(session, user.id)
-    active = [o for o in orders if o.status not in {"shipped", "cancelled"}][:10]
-    if not active:
-        await message.answer("Нет активных заказов.")
+    active = [o for o in orders if o.status not in {"shipped", "cancelled"}]
+    org_id = await _resolve_org_for_user(session, message.from_user.id, user)
+    data = await _load_request_state(message.from_user.id, org_id)
+    data["mode"] = "choose_order"
+    data["orders_offset"] = 0
+    data["orders_page"] = [
+        {"id": o.id, "status": o.status, "created_at": str(getattr(o, "created_at", "") or "")}
+        for o in active[:5]
+    ]
+    data["status"] = "Статус: выберите заказ"
+    await _render_request_cards(message, data, is_admin=_is_admin_tg_id(message.from_user.id))
+
+
+@router.callback_query(F.data.startswith("rm:"))
+async def request_mode_callback(callback: CallbackQuery) -> None:
+    if not callback.message:
+        await callback.answer()
         return
-    lines = [f"#{o.id} — {o.status}" for o in active]
-    await message.answer("Активные заказы:\n" + "\n".join(lines))
+    action_parts = (callback.data or "").split(":", 2)
+    action = action_parts[1] if len(action_parts) > 1 else ""
+    value = action_parts[2] if len(action_parts) > 2 else ""
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, callback.from_user.id)
+        org_id = await _resolve_org_for_user(session, callback.from_user.id, user)
+        data = await _load_request_state(callback.from_user.id, org_id)
+
+        if action == "new":
+            data["mode"] = "draft"
+            data["items"] = []
+            data["expanded"] = False
+            data["status"] = "Статус: ожидаю сообщение…"
+        elif action == "choose_order":
+            if not user:
+                await callback.answer("Сначала выполните вход")
+                return
+            orders = await list_orders_for_user(session, user.id)
+            active = [o for o in orders if o.status not in {"shipped", "cancelled"}]
+            data["mode"] = "choose_order"
+            data["orders_offset"] = 0
+            data["orders_page"] = [{"id": o.id, "status": o.status} for o in active[:5]]
+            data["status"] = "Статус: выберите заказ"
+        elif action in {"orders_next", "orders_prev"}:
+            if not user:
+                await callback.answer("Сначала выполните вход")
+                return
+            orders = await list_orders_for_user(session, user.id)
+            active = [o for o in orders if o.status not in {"shipped", "cancelled"}]
+            offset = int(value) if value.isdigit() else 0
+            offset = max(0, min(offset, max(0, len(active) - 5)))
+            data["orders_offset"] = offset
+            data["orders_page"] = [{"id": o.id, "status": o.status} for o in active[offset: offset + 5]]
+            data["mode"] = "choose_order"
+        elif action == "pick_order" and value.isdigit():
+            data["selected_order_id"] = int(value)
+            data["mode"] = "draft"
+            data["status"] = f"Статус: выбран заказ #{value}"
+        elif action == "orders_back":
+            data["mode"] = "draft"
+        elif action == "toggle_expand":
+            data["expanded"] = not bool(data.get("expanded"))
+        elif action == "items_next" and value.isdigit():
+            data["items_page_offset"] = int(value)
+        elif action == "items_prev" and value.isdigit():
+            data["items_page_offset"] = max(0, int(value))
+        elif action == "item" and value.isdigit():
+            data["selected_item_index"] = int(value)
+            data["expanded"] = True
+        elif action in {"clarify_next", "clarify_prev"} and value.isdigit():
+            idx = int(data.get("selected_item_index") or 0)
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            if 0 <= idx < len(items) and isinstance(items[idx], dict):
+                item = items[idx]
+                base_query = str(item.get("raw") or "")
+                payload = await run_search_pipeline(
+                    session,
+                    org_id=org_id,
+                    user_id=user.id if user else None,
+                    text=base_query,
+                    clarify_offset=int(value),
+                    enable_llm_narrow=False,
+                    enable_llm_rewrite=False,
+                    enable_rerank=False,
+                )
+                item["clarification"] = (payload.get("decision") or {}).get("clarification")
+                logger.info(
+                    "clarify render: org_id=%s q=%s total=%s offset=%s",
+                    org_id,
+                    base_query,
+                    ((item.get("clarification") or {}).get("total") if isinstance(item.get("clarification"), dict) else None),
+                    ((item.get("clarification") or {}).get("offset") if isinstance(item.get("clarification"), dict) else None),
+                )
+        elif action == "clarify_choose":
+            idx = int(data.get("selected_item_index") or 0)
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            if 0 <= idx < len(items) and isinstance(items[idx], dict):
+                item = items[idx]
+                clarification = item.get("clarification") if isinstance(item.get("clarification"), dict) else {}
+                options = clarification.get("options") if isinstance(clarification.get("options"), list) else []
+                selected = next((o for o in options if isinstance(o, dict) and str(o.get("id") or "") == value), None)
+                if selected:
+                    apply = selected.get("apply") if isinstance(selected.get("apply"), dict) else {}
+                    if isinstance(apply.get("set_query"), str) and apply.get("set_query").strip():
+                        next_query = str(apply.get("set_query")).strip()
+                    else:
+                        next_query = _apply_clarification_tokens(str(item.get("raw") or ""), apply.get("append_tokens"))
+                    payload = await run_search_pipeline(
+                        session,
+                        org_id=org_id,
+                        user_id=user.id if user else None,
+                        text=next_query,
+                        clarify_offset=0,
+                        enable_llm_narrow=False,
+                        enable_llm_rewrite=False,
+                        enable_rerank=False,
+                    )
+                    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+                    if results:
+                        item["status"] = "ok"
+                        item["result_title"] = str(results[0].get("title_ru") or "")
+                        item["clarification"] = None
+                    else:
+                        item["status"] = "needs_clarification"
+                        item["clarification"] = (payload.get("decision") or {}).get("clarification")
+        elif action == "clarify_skip":
+            idx = int(data.get("selected_item_index") or 0)
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            if 0 <= idx < len(items) and isinstance(items[idx], dict):
+                items[idx]["status"] = "manager"
+                items[idx]["result_title"] = "передам менеджеру"
+        elif action == "clarify_none":
+            data["status"] = "Статус: введите уточнение текстом"
+        elif action == "confirm":
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            ok_count = len([i for i in items if isinstance(i, dict) and i.get("status") == "ok"])
+            bad_count = len(items) - ok_count
+            data["status"] = f"Статус: ✅ добавлено {ok_count}; ❌ осталось {bad_count}"
+            data["mode"] = "start"
+            data["expanded"] = False
+        elif action == "cancel":
+            data = _default_request_state(org_id)
+        elif action == "manager":
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            for item in items:
+                if isinstance(item, dict):
+                    item["status"] = "manager"
+                    item["result_title"] = "передам менеджеру"
+            data["mode"] = "start"
+            data["status"] = "Статус: передано менеджеру"
+        elif action == "change_org":
+            await callback.answer("Введите /org для смены организации")
+            return
+        elif action == "exit":
+            data = _default_request_state(org_id)
+
+    await _render_request_cards(callback.message, data, is_admin=_is_admin_tg_id(callback.from_user.id))
+    await callback.answer()
+
+
+@router.message(RequestStates.awaiting_text, F.text)
+async def request_mode_text(message: Message, state: FSMContext) -> None:
+    txt = (message.text or "").strip()
+    if not txt:
+        return
+    lowered = txt.lower()
+    if lowered in {"добавить в заказ", "выйти", "сменить организацию"}:
+        return
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, message.from_user.id)
+        org_id = await _resolve_org_for_user(session, message.from_user.id, user)
+        data = await _load_request_state(message.from_user.id, org_id)
+        data["mode"] = "draft"
+        data["status"] = "Статус: 🔎 ищу…"
+        await _render_request_cards(message, data, is_admin=_is_admin_tg_id(message.from_user.id))
+
+        intent_result = await route_message(txt)
+        actions = intent_result.get("actions", []) if isinstance(intent_result, dict) else []
+        add_actions = [a for a in actions if isinstance(a, dict) and a.get("type") == "ADD_ITEM"]
+        eta_actions = [a for a in actions if isinstance(a, dict) and a.get("type") != "ADD_ITEM"]
+        if not add_actions:
+            parsed = parse_order_text(txt)
+            add_actions = [{"query_core": (p.get("query") or p.get("raw") or ""), "qty": p.get("qty"), "unit": p.get("unit")} for p in parsed]
+
+        data["status"] = "Статус: 🧹 нормализую…"
+        await _render_request_cards(message, data, is_admin=_is_admin_tg_id(message.from_user.id))
+        items: list[dict[str, object]] = []
+        for action in add_actions[:20]:
+            q = str(action.get("query_core") or "").strip()
+            if not q:
+                continue
+            payload = await run_search_pipeline(
+                session,
+                org_id=org_id,
+                user_id=user.id if user else None,
+                text=q,
+                clarify_offset=0,
+                enable_llm_narrow=False,
+                enable_llm_rewrite=False,
+                enable_rerank=False,
+            )
+            results = payload.get("results") if isinstance(payload.get("results"), list) else []
+            decision = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
+            item = {
+                "raw": q,
+                "qty": action.get("qty"),
+                "unit": action.get("unit"),
+                "status": "ok" if results else "needs_clarification",
+                "result_title": str(results[0].get("title_ru") or "") if results else "требуется уточнение",
+                "clarification": decision.get("clarification") if isinstance(decision.get("clarification"), dict) else None,
+            }
+            items.append(item)
+
+        data["items"] = items
+        data["questions"] = [str(a.get("subject") or a.get("query_core") or "вопрос").strip() for a in eta_actions[:3] if isinstance(a, dict)]
+        data["selected_item_index"] = 0
+        data["items_page_offset"] = 0
+        data["expanded"] = any(isinstance(i, dict) and i.get("status") != "ok" for i in items)
+        data["status"] = "Статус: ✅ готово"
+        data["mode"] = "review"
+        await _render_request_cards(message, data, is_admin=_is_admin_tg_id(message.from_user.id))
+    await state.set_state(RequestStates.awaiting_text)
 
 
 @router.message(F.text)
