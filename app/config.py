@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     admin_phone: str = "+89047678710"
     admin_tg_id: int = 0
     admin_tg_username: str = ""
+    admin_user_ids: str = ""
     manager_phone: str = "+7999999999"
     secret_key: str = "change-me"
     openai_api_key: str = ""
