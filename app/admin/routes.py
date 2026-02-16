@@ -12,9 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session
-from app.models import Category, OrgMember, Order, Organization, Product, Thread, User
+from app.models import Category, OrgMember, Order, Organization, Product, SearchAlias, Thread, User
 from app.services.search_pipeline import run_search_pipeline
 from app.services.search import llm_search
+from app.services.search_aliases import invalidate_alias_cache
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -163,6 +164,84 @@ async def admin_search_post(
     )
 
 
+
+
+@router.get("/search-aliases", response_class=HTMLResponse)
+async def admin_search_aliases(
+    request: Request,
+    session: SessionDep,
+    org_id: int | None = None,
+) -> HTMLResponse:
+    stmt = select(SearchAlias).order_by(SearchAlias.org_id.is_(None).desc(), SearchAlias.src)
+    if org_id is not None:
+        stmt = stmt.where(SearchAlias.org_id == org_id)
+    aliases = (await session.execute(stmt)).scalars().all()
+    return templates.TemplateResponse(
+        "search_aliases.html",
+        {
+            "request": request,
+            "aliases": aliases,
+            "org_id": org_id,
+        },
+    )
+
+
+@router.post("/search-aliases")
+async def admin_search_aliases_create(
+    session: SessionDep,
+    org_id: Annotated[str | None, Form()] = None,
+    src: Annotated[str, Form()] = "",
+    dst: Annotated[str, Form()] = "",
+    enabled: Annotated[bool, Form()] = True,
+) -> RedirectResponse:
+    src_val = (src or "").strip().lower()
+    dst_val = (dst or "").strip().lower()
+    org_val = int(org_id) if org_id and org_id.strip().isdigit() else None
+    if src_val and dst_val:
+        existing = (
+            await session.execute(
+                select(SearchAlias).where(SearchAlias.org_id == org_val, SearchAlias.src == src_val)
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.dst = dst_val
+            existing.enabled = enabled
+        else:
+            session.add(
+                SearchAlias(
+                    org_id=org_val,
+                    src=src_val,
+                    dst=dst_val,
+                    kind="token",
+                    enabled=enabled,
+                )
+            )
+        await session.commit()
+        await invalidate_alias_cache(org_val)
+    q = f"?org_id={org_val}" if org_val is not None else ""
+    return RedirectResponse(url=f"/admin/search-aliases{q}", status_code=303)
+
+
+@router.post("/search-aliases/{alias_id}/toggle")
+async def admin_search_aliases_toggle(alias_id: int, session: SessionDep) -> RedirectResponse:
+    alias = (await session.execute(select(SearchAlias).where(SearchAlias.id == alias_id))).scalar_one_or_none()
+    if alias:
+        alias.enabled = not alias.enabled
+        await session.commit()
+        await invalidate_alias_cache(alias.org_id)
+    return RedirectResponse(url="/admin/search-aliases", status_code=303)
+
+
+@router.post("/search-aliases/{alias_id}/delete")
+async def admin_search_aliases_delete(alias_id: int, session: SessionDep) -> RedirectResponse:
+    alias = (await session.execute(select(SearchAlias).where(SearchAlias.id == alias_id))).scalar_one_or_none()
+    if alias:
+        org_id = alias.org_id
+        await session.delete(alias)
+        await session.commit()
+        await invalidate_alias_cache(org_id)
+    return RedirectResponse(url="/admin/search-aliases", status_code=303)
+
 @router.get("/debug/search-as", response_class=HTMLResponse)
 async def debug_search_as(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -180,6 +259,7 @@ async def debug_search_as(request: Request) -> HTMLResponse:
             "batch_results": [],
             "selected_user": None,
             "selected_org": None,
+            "offset": 0,
         },
     )
 
@@ -192,6 +272,7 @@ async def debug_search_as_post(
     phone: Annotated[str | None, Form()] = None,
     query: Annotated[str | None, Form()] = None,
     batch: Annotated[str | None, Form()] = None,
+    offset: Annotated[int, Form()] = 0,
 ) -> HTMLResponse:
     resolved_org_id: int | None = None
     resolved_user_id: int | None = None
@@ -243,6 +324,7 @@ async def debug_search_as_post(
                     user_id=resolved_user_id,
                     text=line,
                     limit=5,
+                    clarify_offset=offset,
                 )
                 batch_results.append(
                     {
@@ -259,6 +341,7 @@ async def debug_search_as_post(
                 user_id=resolved_user_id,
                 text=query.strip(),
                 limit=5,
+                clarify_offset=offset,
             )
             results = payload["results"]
             decision = payload["decision"]
@@ -279,5 +362,6 @@ async def debug_search_as_post(
             "batch_results": batch_results,
             "selected_user": selected_user,
             "selected_org": selected_org,
+            "offset": offset,
         },
     )

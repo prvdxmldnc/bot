@@ -343,8 +343,11 @@ async def clarify_choice(callback: CallbackQuery) -> None:
 
     apply = selected_option.get("apply") if isinstance(selected_option, dict) else {}
     apply = apply if isinstance(apply, dict) else {}
-    append_tokens = apply.get("append_tokens") if isinstance(apply.get("append_tokens"), list) else []
-    next_query = _apply_clarification_tokens(base_query, append_tokens)
+    if isinstance(apply.get("set_query"), str) and apply.get("set_query").strip():
+        next_query = str(apply.get("set_query")).strip()
+    else:
+        append_tokens = apply.get("append_tokens") if isinstance(apply.get("append_tokens"), list) else []
+        next_query = _apply_clarification_tokens(base_query, append_tokens)
 
     async with get_session_context() as session:
         pipeline_result = await run_search_pipeline(
@@ -832,6 +835,13 @@ async def handle_text_order(message: Message) -> None:
                     question = str(clarification.get("question") or "Уточни вариант:")
                     options = clarification.get("options") or []
                     if isinstance(options, list) and options:
+                        logger.info(
+                            "clarify render: reason=%s options_count=%s next=%s prev=%s",
+                            clarification.get("reason"),
+                            len(options),
+                            clarification.get("next_offset"),
+                            clarification.get("prev_offset"),
+                        )
                         sent = await message.answer(question, reply_markup=_clarify_keyboard(clarification))
                         redis_client = _redis_client()
                         if redis_client:

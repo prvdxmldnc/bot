@@ -190,3 +190,72 @@ def test_clarify_choose_callback_supports_option_id(monkeypatch):
     asyncio.run(handlers.clarify_choice(FakeCallback()))
 
     assert captured["text"] == "нитки белые 70 лл"
+
+
+def test_clarify_prev_callback_uses_offset_and_no_send(monkeypatch):
+    captured = {"offset": None, "edited_text": None}
+
+    class FakeRedis:
+        async def get(self, _key):
+            return json.dumps(
+                {
+                    "org_id": 42,
+                    "user_id": 7,
+                    "base_query": "спанбонд",
+                    "clarification": {"options": []},
+                },
+                ensure_ascii=False,
+            )
+
+        async def setex(self, *_args, **_kwargs):
+            return True
+
+    class FakeMessage:
+        message_id = 103
+
+        async def edit_text(self, text, **_kwargs):
+            captured["edited_text"] = text
+            return None
+
+        async def answer(self, *_args, **_kwargs):
+            raise AssertionError("send_message should not be called")
+
+    class FakeFromUser:
+        id = 14
+
+    class FakeCallback:
+        data = "clarify:prev:0"
+        message = FakeMessage()
+        from_user = FakeFromUser()
+
+        async def answer(self, *_args, **_kwargs):
+            return None
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        yield object()
+
+    async def fake_run_search_pipeline(_session, **kwargs):
+        captured["offset"] = kwargs.get("clarify_offset")
+        return {
+            "results": [],
+            "decision": {
+                "clarification": {
+                    "question": "Уточни товар:",
+                    "options": [],
+                    "next_offset": None,
+                    "prev_offset": None,
+                    "total": 0,
+                    "offset": 0,
+                }
+            },
+        }
+
+    monkeypatch.setattr(handlers, "_redis_client", lambda: FakeRedis())
+    monkeypatch.setattr(handlers, "get_session_context", fake_session_ctx)
+    monkeypatch.setattr(handlers, "run_search_pipeline", fake_run_search_pipeline)
+
+    asyncio.run(handlers.clarify_choice(FakeCallback()))
+
+    assert captured["offset"] == 0
+    assert captured["edited_text"] == "Уточни товар:"

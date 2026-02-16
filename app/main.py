@@ -9,6 +9,7 @@ from app.database import get_session, init_db
 from app.integrations.onec import router as one_c_router
 from app.models import Category, Organization, Order, Product, User
 from app.services.one_c import schedule_one_c_sync
+from app.services.search_aliases import seed_default_aliases
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 app = FastAPI(title="Partner-M API")
@@ -19,6 +20,10 @@ app.include_router(one_c_router)
 @app.on_event("startup")
 async def startup() -> None:
     await init_db()
+    async for session in get_session():
+        await seed_default_aliases(session)
+        await session.commit()
+        break
     if settings.one_c_enabled:
         import asyncio
         asyncio.create_task(schedule_one_c_sync(get_session))
