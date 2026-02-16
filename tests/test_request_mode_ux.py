@@ -158,9 +158,10 @@ def test_request_mode_position_and_clarify_paging_edit_only(monkeypatch):
         "selected_item_index": 0,
         "items_page_offset": 0,
         "clarify_page_offset": 0,
+        "clarify_expanded": True,
         "expanded": True,
         "mode": "review",
-        "status": "Статус: ✅ готово",
+        "status": "Статус: ✅ Готово",
         "questions": [],
         "orders_offset": 0,
         "orders_page": [],
@@ -172,6 +173,6 @@ def test_request_mode_position_and_clarify_paging_edit_only(monkeypatch):
     asyncio.run(handlers.request_mode_callback(FakeCallback("rm:item:0", message)))
     assert handlers._REQUEST_MODE_MEM[501]["selected_item_index"] == 0
 
-    asyncio.run(handlers.request_mode_callback(FakeCallback("rm:clarify_next:10", message)))
+    asyncio.run(handlers.request_mode_callback(FakeCallback("rm:clarify:next:10", message)))
     assert captured["offset"] == 10
     assert bot.edits
