@@ -333,3 +333,17 @@ cat /var/backups/partner-m/partner-m-YYYY-MM-DD.sql | docker compose exec -T db 
   }
 }
 ```
+
+
+## Admin Telegram org switch + request mode
+
+- Set admin telegram IDs via `ADMIN_USER_IDS` (CSV) in `.env`.
+- In Telegram, admin can run `/org` to view/select debug organization for search-as flow.
+- Selected org is persisted in Redis key `tg:debug_org:{telegram_user_id}` and used by bot search pipeline calls.
+- Main menu now contains `Отправить заявку` button.
+- In request mode you can:
+  - create/send request text,
+  - open active orders list (`Добавить в заказ`),
+  - for admins: `Сменить организацию`,
+  - exit mode (`Выйти`).
+- Clarification UI keeps inline paging and edits existing message (no chat spam).

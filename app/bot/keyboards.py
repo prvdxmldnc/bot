@@ -19,6 +19,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Заказы"), KeyboardButton(text="Мои вопросы")],
             [KeyboardButton(text="Баланс"), KeyboardButton(text="Пригласить работника")],
             [KeyboardButton(text="Каталог"), KeyboardButton(text="Аккаунт")],
+            [KeyboardButton(text="Отправить заявку")],
         ],
         resize_keyboard=True,
     )

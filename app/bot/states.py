@@ -14,3 +14,12 @@ class RegistrationStates(StatesGroup):
 class LoginStates(StatesGroup):
     phone = State()
     password = State()
+
+
+class DebugOrgStates(StatesGroup):
+    awaiting_org_id = State()
+
+
+class RequestStates(StatesGroup):
+    menu = State()
+    awaiting_text = State()

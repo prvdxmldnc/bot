@@ -4,7 +4,7 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -21,7 +21,7 @@ from app.bot.keyboards import (
     registration_done_keyboard,
     start_keyboard,
 )
-from app.bot.states import LoginStates, RegistrationStates
+from app.bot.states import DebugOrgStates, LoginStates, RegistrationStates, RequestStates
 from app.config import settings
 from app.crud import (
     create_organization,
@@ -106,6 +106,87 @@ def _redis_client() -> Redis | None:
 
 def _candidate_cache_key(tg_id: int, message_id: int) -> str:
     return f"candidates:{tg_id}:{message_id}"
+
+
+def _admin_user_ids() -> set[int]:
+    raw = (settings.admin_user_ids or "").strip()
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    if settings.admin_tg_id:
+        ids.add(settings.admin_tg_id)
+    return ids
+
+
+def _is_admin_tg_id(tg_id: int) -> bool:
+    return tg_id in _admin_user_ids()
+
+
+def _debug_org_key(tg_id: int) -> str:
+    return f"tg:debug_org:{tg_id}"
+
+
+def _menu_anchor_key(tg_id: int) -> str:
+    return f"tg:menu_message:{tg_id}"
+
+
+def _results_anchor_key(tg_id: int) -> str:
+    return f"tg:results_message:{tg_id}"
+
+
+async def _get_debug_org_id(tg_id: int) -> int | None:
+    client = _redis_client()
+    if not client:
+        return None
+    value = await client.get(_debug_org_key(tg_id))
+    if not value:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _set_debug_org_id(tg_id: int, org_id: int | None) -> None:
+    client = _redis_client()
+    if not client:
+        return
+    key = _debug_org_key(tg_id)
+    if org_id is None:
+        await client.delete(key)
+    else:
+        await client.set(key, str(org_id), ex=60 * 60 * 24)
+
+
+async def _resolve_org_for_user(session: AsyncSession, tg_id: int, user: User | None) -> int | None:
+    debug_org_id = await _get_debug_org_id(tg_id)
+    if debug_org_id:
+        return debug_org_id
+    if _is_admin_tg_id(tg_id):
+        return 1
+    if user:
+        result = await session.execute(
+            select(OrgMember)
+            .where(OrgMember.user_id == user.id, OrgMember.status == "active")
+            .order_by(OrgMember.org_id)
+        )
+        member = result.scalars().first()
+        if member:
+            return member.org_id
+    return None
+
+
+def _request_mode_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="Создать новую заявку"), KeyboardButton(text="Добавить в заказ")],
+    ]
+    if is_admin:
+        rows.append([KeyboardButton(text="Сменить организацию")])
+    rows.append([KeyboardButton(text="Выйти")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
 
 
 def _shorten_title(title: str, max_len: int = 50) -> str:
@@ -202,6 +283,60 @@ async def llm_test(message: Message) -> None:
         await message.answer("LLM тест не прошел. Проверьте локальный LLM/Ollama.")
         return
     await message.answer(f"LLM ответ: {content}")
+
+
+
+
+@router.message(Command("org"))
+async def org_command(message: Message, state: FSMContext) -> None:
+    if not _is_admin_tg_id(message.from_user.id):
+        await message.answer("Команда доступна только администратору.")
+        return
+    current = await _get_debug_org_id(message.from_user.id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Org 1", callback_data="org:set:1"), InlineKeyboardButton(text="Org 42", callback_data="org:set:42")],
+            [InlineKeyboardButton(text="Сброс", callback_data="org:clear")],
+        ]
+    )
+    await state.set_state(DebugOrgStates.awaiting_org_id)
+    await message.answer(f"Текущая организация: {current or 1}. Выберите org или введите org_id числом.", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("org:"))
+async def org_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) < 2:
+        await callback.answer("Не удалось обработать")
+        return
+    action = parts[1]
+    if action == "clear":
+        await _set_debug_org_id(callback.from_user.id, None)
+        await callback.answer("Организация сброшена")
+        if callback.message:
+            await callback.message.edit_text("Организация сброшена. Сейчас используется fallback org=1.")
+        await state.clear()
+        return
+    if action == "set" and len(parts) == 3 and parts[2].isdigit():
+        org_id = int(parts[2])
+        await _set_debug_org_id(callback.from_user.id, org_id)
+        await callback.answer("Готово")
+        if callback.message:
+            await callback.message.edit_text(f"Установлена организация: {org_id}")
+        await state.clear()
+        return
+    await callback.answer("Не удалось обработать")
+
+
+@router.message(DebugOrgStates.awaiting_org_id, F.text.regexp(r"^\d+$"))
+async def org_input(message: Message, state: FSMContext) -> None:
+    if not _is_admin_tg_id(message.from_user.id):
+        await message.answer("Команда доступна только администратору.")
+        return
+    org_id = int(message.text)
+    await _set_debug_org_id(message.from_user.id, org_id)
+    await state.clear()
+    await message.answer(f"Установлена организация: {org_id}")
 
 
 @router.callback_query(F.data.startswith("alias:"))
@@ -789,6 +924,45 @@ async def account(message: Message) -> None:
     )
 
 
+
+
+@router.message(F.text == "Отправить заявку")
+async def request_mode_start(message: Message, state: FSMContext) -> None:
+    is_admin = _is_admin_tg_id(message.from_user.id)
+    await state.set_state(RequestStates.awaiting_text)
+    await message.answer(
+        "Отправьте заявку или список. Можно создать новую заявку или добавить в заказ.",
+        reply_markup=_request_mode_keyboard(is_admin),
+    )
+
+
+@router.message(RequestStates.awaiting_text, F.text == "Сменить организацию")
+async def request_mode_change_org(message: Message, state: FSMContext) -> None:
+    await org_command(message, state)
+
+
+@router.message(RequestStates.awaiting_text, F.text == "Выйти")
+async def request_mode_exit(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Режим заявки завершен.", reply_markup=main_menu_keyboard())
+
+
+@router.message(RequestStates.awaiting_text, F.text == "Добавить в заказ")
+async def request_mode_add_to_order(message: Message) -> None:
+    async with get_session_context() as session:
+        user = await get_user_by_tg_id(session, message.from_user.id)
+        if not user:
+            await message.answer("Сначала выполните вход.")
+            return
+        orders = await list_orders_for_user(session, user.id)
+    active = [o for o in orders if o.status not in {"shipped", "cancelled"}][:10]
+    if not active:
+        await message.answer("Нет активных заказов.")
+        return
+    lines = [f"#{o.id} — {o.status}" for o in active]
+    await message.answer("Активные заказы:\n" + "\n".join(lines))
+
+
 @router.message(F.text)
 async def handle_text_order(message: Message) -> None:
     async with get_session_context() as session:
@@ -798,7 +972,10 @@ async def handle_text_order(message: Message) -> None:
             return
         result = await session.execute(select(User).options(selectinload(User.org_memberships)).where(User.id == user.id))
         user = result.scalar_one()
+        resolved_org_id = await _resolve_org_for_user(session, message.from_user.id, user)
 
+        status_msg = await message.answer("🔎 Ищу позиции…")
+        await status_msg.edit_text("🧹 Нормализую запрос…")
         intent_result = await route_message(message.text)
         actions = intent_result.get("actions", []) if isinstance(intent_result, dict) else []
         add_actions = [a for a in actions if isinstance(a, dict) and a.get("type") == "ADD_ITEM"]
@@ -811,7 +988,7 @@ async def handle_text_order(message: Message) -> None:
                     continue
                 pipeline_result = await run_search_pipeline(
                     session,
-                    org_id=None,
+                    org_id=resolved_org_id,
                     user_id=user.id,
                     text=action_query,
                     limit=5,
@@ -874,6 +1051,7 @@ async def handle_text_order(message: Message) -> None:
                 return
         if eta_actions:
             eta_query = str(eta_actions[0].get("subject") or eta_actions[0].get("query_core") or "").strip()
+            await status_msg.edit_text("✅ Готово")
             await message.answer(await get_stock_eta(eta_query))
             return
         parsed_items = parse_order_text(message.text)
