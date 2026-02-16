@@ -347,3 +347,4 @@ cat /var/backups/partner-m/partner-m-YYYY-MM-DD.sql | docker compose exec -T db 
   - for admins: `Сменить организацию`,
   - exit mode (`Выйти`).
 - Clarification UI keeps inline paging and edits existing message (no chat spam).
+- Request mode is mobile-first: bot keeps two cards only (ResultsCard + ControlCard) and updates them via message edits.

@@ -653,6 +653,7 @@ async def run_search_pipeline(
             ]
             clarification = build_clarification(reason="facet_conflict", options=opts, offset=clarify_offset, page_size=10, question="Уточни цвет:")
             clarify_reason = "facet_conflict"
+            candidates = []
 
     if candidates and len(candidates) > 1:
         normal = [c for c in candidates if not _contains_negative_marker(str(c.get("title_ru") or ""))]
@@ -672,6 +673,7 @@ async def run_search_pipeline(
                     question="Вы имели в виду отходы или обычный товар?",
                 )
                 clarify_reason = "facet_conflict"
+                candidates = []
 
     if not candidates and clarification is None:
         head_token = extract_head_token(search_query or text)
