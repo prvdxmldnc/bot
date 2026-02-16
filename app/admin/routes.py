@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session
-from app.models import Category, OrgMember, Order, Organization, Product, SearchAlias, Thread, User
+from app.models import Category, CategoryFacetConfig, OrgMember, Order, Organization, Product, SearchAlias, Thread, User
 from app.services.search_pipeline import run_search_pipeline
 from app.services.search import llm_search
 from app.services.search_aliases import invalidate_alias_cache
@@ -165,6 +165,68 @@ async def admin_search_post(
 
 
 
+
+
+
+@router.get("/facets", response_class=HTMLResponse)
+async def admin_facets(
+    request: Request,
+    session: SessionDep,
+    category_id: int | None = None,
+    q: str | None = None,
+) -> HTMLResponse:
+    cat_stmt = select(Category).order_by(Category.title_ru)
+    categories = (await session.execute(cat_stmt)).scalars().all()
+
+    facet_stmt = select(CategoryFacetConfig, Category.title_ru).join(Category, Category.id == CategoryFacetConfig.category_id)
+    if category_id is not None:
+        facet_stmt = facet_stmt.where(CategoryFacetConfig.category_id == category_id)
+    if q:
+        facet_stmt = facet_stmt.where(Category.title_ru.ilike(f"%{q}%"))
+    facet_stmt = facet_stmt.order_by(CategoryFacetConfig.category_id, CategoryFacetConfig.priority)
+    rows = (await session.execute(facet_stmt)).all()
+    return templates.TemplateResponse(
+        "facets.html",
+        {
+            "request": request,
+            "rows": rows,
+            "categories": categories,
+            "category_id": category_id,
+            "q": q or "",
+        },
+    )
+
+
+@router.post("/facets")
+async def admin_facets_create(
+    session: SessionDep,
+    category_id: Annotated[int, Form()],
+    facet_key: Annotated[str, Form()],
+    enabled: Annotated[bool, Form()] = True,
+    priority: Annotated[int, Form()] = 100,
+) -> RedirectResponse:
+    cfg = CategoryFacetConfig(category_id=category_id, facet_key=(facet_key or "").strip(), enabled=enabled, priority=priority)
+    session.add(cfg)
+    await session.commit()
+    return RedirectResponse(url="/admin/facets", status_code=303)
+
+
+@router.post("/facets/{cfg_id}/toggle")
+async def admin_facets_toggle(cfg_id: int, session: SessionDep) -> RedirectResponse:
+    cfg = (await session.execute(select(CategoryFacetConfig).where(CategoryFacetConfig.id == cfg_id))).scalar_one_or_none()
+    if cfg:
+        cfg.enabled = not cfg.enabled
+        await session.commit()
+    return RedirectResponse(url="/admin/facets", status_code=303)
+
+
+@router.post("/facets/{cfg_id}/delete")
+async def admin_facets_delete(cfg_id: int, session: SessionDep) -> RedirectResponse:
+    cfg = (await session.execute(select(CategoryFacetConfig).where(CategoryFacetConfig.id == cfg_id))).scalar_one_or_none()
+    if cfg:
+        await session.delete(cfg)
+        await session.commit()
+    return RedirectResponse(url="/admin/facets", status_code=303)
 
 @router.get("/search-aliases", response_class=HTMLResponse)
 async def admin_search_aliases(

@@ -836,7 +836,11 @@ async def handle_text_order(message: Message) -> None:
                     options = clarification.get("options") or []
                     if isinstance(options, list) and options:
                         logger.info(
-                            "clarify render: reason=%s options_count=%s next=%s prev=%s",
+                            "clarify render: org_id=%s q=%s total=%s offset=%s reason=%s options_count=%s next=%s prev=%s",
+                            decision_payload.get("history_org_id"),
+                            action_query,
+                            clarification.get("total"),
+                            clarification.get("offset"),
                             clarification.get("reason"),
                             len(options),
                             clarification.get("next_offset"),

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Facet configs</title>
+</head>
+<body>
+  <h1>Facet configs</h1>
+
+  <form action="/admin/facets" method="get">
+    <label>Category ID: <input type="text" name="category_id" value="{{ category_id or '' }}" /></label>
+    <label>Search: <input type="text" name="q" value="{{ q or '' }}" /></label>
+    <button type="submit">Фильтр</button>
+  </form>
+
+  <h2>Добавить</h2>
+  <form action="/admin/facets" method="post">
+    <label>Category:
+      <select name="category_id">
+        {% for c in categories %}
+          <option value="{{ c.id }}">{{ c.id }} — {{ c.title_ru }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Facet key: <input type="text" name="facet_key" placeholder="color" /></label>
+    <label>Priority: <input type="number" name="priority" value="100" /></label>
+    <label><input type="checkbox" name="enabled" checked /> enabled</label>
+    <button type="submit">Создать</button>
+  </form>
+
+  <h2>Список</h2>
+  <table border="1" cellpadding="6">
+    <tr><th>ID</th><th>Category</th><th>Facet</th><th>Enabled</th><th>Priority</th><th>Actions</th></tr>
+    {% for row in rows %}
+      {% set cfg = row[0] %}
+      {% set title = row[1] %}
+      <tr>
+        <td>{{ cfg.id }}</td>
+        <td>{{ cfg.category_id }} — {{ title }}</td>
+        <td>{{ cfg.facet_key }}</td>
+        <td>{{ cfg.enabled }}</td>
+        <td>{{ cfg.priority }}</td>
+        <td>
+          <form action="/admin/facets/{{ cfg.id }}/toggle" method="post" style="display:inline-block;"><button type="submit">toggle</button></form>
+          <form action="/admin/facets/{{ cfg.id }}/delete" method="post" style="display:inline-block;"><button type="submit">delete</button></form>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+
+  <a href="/admin">Назад</a>
+</body>
+</html>

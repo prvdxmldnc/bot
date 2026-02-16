@@ -84,6 +84,52 @@ _COLOR_TOKEN_MAP = {
 }
 _ADJ_ENDINGS = ("ая", "яя", "ый", "ий", "ое", "ее", "ые", "ие", "ого", "ему", "ым", "ой", "ую", "юю")
 
+
+_COLOR_KEYWORDS = {
+    "бел": ["бел", "white"],
+    "чер": ["чер", "black"],
+    "сер": ["сер", "grey", "gray"],
+    "беж": ["беж"],
+    "кор": ["корич"],
+    "крас": ["крас"],
+    "син": ["син"],
+    "зел": ["зел"],
+}
+_DENSITY_RE = re.compile(r"\b(\d{2,3})\s*(?:г/м2|гм2|gsm|г/м)\b", re.IGNORECASE)
+_NEGATIVE_MARKERS = ("отход", "обрез", "брак")
+
+
+def extract_query_facets(query: str) -> dict[str, str]:
+    q = (query or "").lower()
+    facets: dict[str, str] = {}
+    for key, variants in _COLOR_KEYWORDS.items():
+        if any(v in q for v in variants):
+            facets["color"] = key
+            break
+    m = _DENSITY_RE.search(q)
+    if m:
+        facets["density_gsm"] = m.group(1)
+    return facets
+
+
+def _candidate_color_key(title: str) -> str | None:
+    t = (title or "").lower()
+    for key, variants in _COLOR_KEYWORDS.items():
+        if any(v in t for v in variants):
+            return key
+    return None
+
+
+def color_filter_candidates(candidates: list[dict[str, Any]], color_key: str) -> list[dict[str, Any]]:
+    if not color_key:
+        return candidates
+    return [c for c in candidates if _candidate_color_key(str(c.get("title_ru") or "")) == color_key]
+
+
+def _contains_negative_marker(title: str) -> bool:
+    txt = (title or "").lower()
+    return any(marker in txt for marker in _NEGATIVE_MARKERS)
+
 def apply_token_synonyms(text: str, alias_map: dict[str, str]) -> tuple[str, dict[str, str]]:
     return normalize_query_with_aliases(text, alias_map)
 
@@ -337,6 +383,7 @@ async def run_search_pipeline(
         normalized_text = normalize_query_text(search_query or text)
     trace_tokens, trace_numbers = _extract_trace_tokens_numbers(search_query or text)
     attempt_queries = _build_attempt_queries(search_query or text)
+    query_facets = extract_query_facets(search_query or text)
 
     history_candidates_count = 0
     history_used = False
@@ -587,8 +634,46 @@ async def run_search_pipeline(
     clarification = None
     clarify_reason = "skipped"
     clarification_options: list[dict[str, Any]] = []
+    applied_filters: list[dict[str, Any]] = []
 
-    if not candidates:
+    if candidates and query_facets.get("color"):
+        before = len(candidates)
+        filtered = color_filter_candidates(candidates, query_facets["color"])
+        applied_filters.append({"facet": "color", "value": query_facets["color"], "before": before, "after": len(filtered)})
+        if filtered:
+            candidates = filtered
+        elif before > 0:
+            color_groups: dict[str, int] = {}
+            for c in candidates:
+                ck = _candidate_color_key(str(c.get("title_ru") or "")) or "другой"
+                color_groups[ck] = color_groups.get(ck, 0) + 1
+            opts = [
+                {"id": f"color_{k}", "label": k, "apply": {"append_tokens": [k]}}
+                for k, _cnt in sorted(color_groups.items(), key=lambda x: x[1], reverse=True)
+            ]
+            clarification = build_clarification(reason="facet_conflict", options=opts, offset=clarify_offset, page_size=10, question="Уточни цвет:")
+            clarify_reason = "facet_conflict"
+
+    if candidates and len(candidates) > 1:
+        normal = [c for c in candidates if not _contains_negative_marker(str(c.get("title_ru") or ""))]
+        negative = [c for c in candidates if _contains_negative_marker(str(c.get("title_ru") or ""))]
+        if negative and normal:
+            candidates = normal + negative
+            if _contains_negative_marker(str(candidates[0].get("title_ru") or "")):
+                opts = [
+                    {"id": "neg_waste", "label": "Отходы / обрезки", "apply": {"append_tokens": ["отходы"]}},
+                    {"id": "neg_normal", "label": "Обычный товар", "apply": {"append_tokens": ["обычный"]}},
+                ]
+                clarification = build_clarification(
+                    reason="facet_conflict",
+                    options=opts,
+                    offset=0,
+                    page_size=10,
+                    question="Вы имели в виду отходы или обычный товар?",
+                )
+                clarify_reason = "facet_conflict"
+
+    if not candidates and clarification is None:
         head_token = extract_head_token(search_query or text)
         suggestions: list[dict[str, Any]] = []
         if history_org_id and head_token:
@@ -614,7 +699,7 @@ async def run_search_pipeline(
         )
         clarify_reason = clarification.get("reason")
 
-    elif len(candidates) > 30:
+    elif clarification is None and len(candidates) > 30:
         facet = build_facet_options(candidates, max_values=30)
         if facet:
             facet_name, facet_options = facet
@@ -667,6 +752,8 @@ async def run_search_pipeline(
         decision_payload["synonym_map"] = synonym_map
         decision_payload["query_retry"] = synonym_retry_query or search_query
         decision_payload["retry_results_count"] = synonym_retry_results_count
+        decision_payload["query_facets"] = query_facets
+        decision_payload["applied_filters"] = applied_filters
 
         trace_by_name["clarify"] = {
             "name": "clarify",
@@ -700,6 +787,8 @@ async def run_search_pipeline(
             "synonym_map": synonym_map,
             "query_retry": synonym_retry_query or search_query,
             "retry_results_count": synonym_retry_results_count,
+            "query_facets": query_facets,
+            "applied_filters": applied_filters,
             "stages": [
                 trace_by_name.get("history"),
                 trace_by_name.get("alias"),
@@ -941,6 +1030,8 @@ async def run_search_pipeline(
             "synonym_map": synonym_map,
             "query_retry": synonym_retry_query or search_query,
             "retry_results_count": synonym_retry_results_count,
+            "query_facets": query_facets,
+            "applied_filters": applied_filters,
         },
         "trace": trace,
     }
