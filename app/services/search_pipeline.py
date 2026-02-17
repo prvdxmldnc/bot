@@ -109,6 +109,10 @@ def extract_query_facets(query: str) -> dict[str, str]:
     m = _DENSITY_RE.search(q)
     if m:
         facets["density_gsm"] = m.group(1)
+    elif ("спанбонд" in q or "спандбонд" in q or "агро" in q):
+        generic = re.search(r"\b(\d{2,3})\b", q)
+        if generic:
+            facets["density_gsm"] = generic.group(1)
     return facets
 
 
@@ -124,6 +128,55 @@ def color_filter_candidates(candidates: list[dict[str, Any]], color_key: str) ->
     if not color_key:
         return candidates
     return [c for c in candidates if _candidate_color_key(str(c.get("title_ru") or "")) == color_key]
+
+
+def _candidate_density_match(title: str, density: str) -> bool:
+    t = (title or "").lower()
+    if not density:
+        return True
+    token_match = re.search(rf"\b{re.escape(density)}\b", t)
+    if not token_match:
+        return False
+    if re.search(rf"\b{re.escape(density)}\s*(?:г/м2|гм2|gsm|г/м)\b", t):
+        return True
+    if "спанбонд" in t or "агро" in t:
+        return True
+    return False
+
+
+def _filter_clarify_suggestions_by_facets(
+    suggestions: list[dict[str, Any]],
+    query_facets: dict[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    details: dict[str, Any] = {"facet_filter_relaxed": False}
+    filtered = suggestions
+
+    density = query_facets.get("density_gsm")
+    if density and filtered:
+        density_filtered = [s for s in filtered if _candidate_density_match(str(s.get("title") or s.get("title_ru") or ""), density)]
+        details["density_before"] = len(filtered)
+        details["density_after"] = len(density_filtered)
+        if density_filtered:
+            filtered = density_filtered
+        else:
+            details["facet_filter_relaxed"] = True
+            details["density_relaxed"] = True
+
+    color = query_facets.get("color")
+    if color and filtered:
+        color_filtered = [
+            s for s in filtered
+            if _candidate_color_key(str(s.get("title") or s.get("title_ru") or "")) == color
+        ]
+        details["color_before"] = len(filtered)
+        details["color_after"] = len(color_filtered)
+        if color_filtered:
+            filtered = color_filtered
+        else:
+            details["facet_filter_relaxed"] = True
+            details["color_relaxed"] = True
+
+    return filtered, details
 
 
 def _contains_negative_marker(title: str) -> bool:
@@ -691,6 +744,26 @@ async def run_search_pipeline(
             for src, dst in alias_map.items():
                 if src in (search_query or text).lower() and dst:
                     suggestions.append({"product_id": None, "title": dst})
+
+        filtered_suggestions, filter_details = _filter_clarify_suggestions_by_facets(suggestions, query_facets)
+        if filter_details.get("density_before") is not None:
+            applied_filters.append({
+                "facet": "density_gsm",
+                "value": query_facets.get("density_gsm"),
+                "before": filter_details.get("density_before"),
+                "after": filter_details.get("density_after"),
+                "relaxed": bool(filter_details.get("density_relaxed")),
+            })
+        if filter_details.get("color_before") is not None:
+            applied_filters.append({
+                "facet": "color",
+                "value": query_facets.get("color"),
+                "before": filter_details.get("color_before"),
+                "after": filter_details.get("color_after"),
+                "relaxed": bool(filter_details.get("color_relaxed")),
+            })
+        suggestions = filtered_suggestions if filtered_suggestions else suggestions
+
         clarification_options = suggestions_to_options(suggestions)
         clarification = build_clarification(
             reason="no_candidates",
