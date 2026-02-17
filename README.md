@@ -1,1 +1,365 @@
-# bot
+# Partner-M Bot
+
+Готовый к запуску Telegram-бот + API панель (FastAPI + aiogram + PostgreSQL + Redis).
+
+## Быстрый старт
+
+1. Скопируйте `.env.example` → `.env` и заполните `BOT_TOKEN`.
+2. Запустите деплой одной командой:
+
+```bash
+./deploy.sh
+```
+
+После запуска:
+- API доступен на `http://localhost:8000/health`.
+- Бот начнет принимать сообщения в Telegram.
+
+## Админ-панель
+
+Откройте `http://localhost:8000/admin` — там доступны:
+- каталог и импорт CSV,
+- заказы (смена статуса),
+- вопросы,
+- поиск (LLM при наличии ключа).
+
+### Admin Debug Search As User
+
+В админке доступен отладочный поиск “как клиент” без Telegram:
+
+- `/admin/debug/search-as` — выбор контекста по `org_id` или телефону и прогон одиночных/пакетных запросов.
+
+Для команд администратора в Telegram (например, `/llm_test`) можно задать
+`ADMIN_TG_ID` или `ADMIN_TG_USERNAME` в `.env`, если телефон скрыт.
+
+`SECRET_KEY` используется для внутренних подписей/хэшей и должен быть уникальным
+длинным значением. Его можно сгенерировать, например:
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
+Если при обращении к GigaChat появляются ошибки `CERTIFICATE_VERIFY_FAILED`,
+в контейнер автоматически ставятся сертификаты НУЦ Минцифры при сборке образа
+(скачивание с `gu-st.ru` + `update-ca-certificates`).
+
+Проверка TLS внутри контейнера:
+`docker compose exec bot /app/scripts/smoke_gigachat_tls.sh`.
+
+## LLM smoke checks
+
+Команды выполняются внутри контейнера `bot`:
+
+```bash
+docker compose exec bot /app/scripts/check_llm_tls.sh
+docker compose exec bot /app/scripts/check_llm_oauth.sh
+docker compose exec bot /app/scripts/check_llm_chat.sh
+```
+
+`GIGACHAT_BASIC_AUTH_KEY` — это **Authorization key (base64)** из кабинета.
+
+## Основные функции
+
+- Регистрация/вход по телефону и паролю.
+- Роли: клиент/менеджер/админ (по номеру телефона из `.env`).
+- Каталог: дерево категорий и список товаров.
+- Заказы: создание заказа по тексту (поиск товара по названию).
+- Вопросы: список тем для организации.
+- Админ-панель: каталог, заказы, вопросы, поиск.
+
+## Структура
+
+- `app/main.py` — FastAPI API.
+- `app/bot_app.py` — запуск Telegram-бота.
+- `app/bot/handlers.py` — обработчики сообщений.
+- `docker-compose.yml` — сервисы БД, Redis, API и бота.
+
+## LLM-поиск
+
+Для LLM-поиска укажите в `.env` ключ и модель. Приоритет: GigaChat → OpenAI → локальный поиск.
+
+```
+GIGACHAT_OAUTH_URL=https://ngw.devices.sberbank.ru:9443/api/v2/oauth
+GIGACHAT_BASIC_AUTH_KEY=ваш_base64_ключ
+GIGACHAT_SCOPE=GIGACHAT_API_PERS
+GIGACHAT_API_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
+GIGACHAT_MODEL=GigaChat
+GIGACHAT_TIMEOUT_SECONDS=20
+GIGACHAT_TOKEN_CACHE_PREFIX=gigachat:token
+GIGACHAT_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+OPENAI_API_KEY=ваш_ключ
+OPENAI_MODEL=gpt-4o-mini
+```
+
+LLM ожидает JSON-массив объектов с полями `title` и опционально `qty`.
+Если ключи не заданы, поиск использует локальный поиск по каталогу.
+При 401/403 токен обновляется автоматически и запрос повторяется.
+
+## Синхронизация с 1С (10 УТ)
+
+Для интеграции с 1С доступно два режима:
+
+1) **HTTP push (рекомендуется)** — 1С отправляет каталог в бот по HTTP.
+2) **HTTP pull** — бот сам забирает каталог из 1С по расписанию.
+
+### HTTP push: 1С → бот
+
+Бот принимает JSON по адресу (любой из вариантов):
+
+```
+POST /integrations/1c/catalog
+POST /onec/catalog
+POST /api/onec/catalog
+```
+
+Если задан `ONE_C_WEBHOOK_TOKEN`, передавайте токен одним из способов:
+
+- `Authorization: Bearer <token>`
+- `X-1C-Token: <token>`
+- `X-Token: <token>`
+- query-параметр `?token=<token>`
+HTTP push сразу пишет в БД через `upsert_catalog`, логирует `request_id` и возвращает summary:
+
+```json
+{
+  "ok": true,
+  "categories_received": 1,
+  "categories_upserted": 1,
+  "products_received": 10,
+  "products_upserted": 9,
+  "products_skipped_missing_category": 1,
+  "products_skipped_invalid": 0,
+  "total_time_ms": 124,
+  "request_id": "uuid"
+}
+```
+
+Поддерживаются **оба формата** payload:
+- legacy: массив или `{ "items": [...] }` / `{ "catalog": [...] }`
+- 1С-формат: `{ "categories": [...], "products": [...], "price_type": "..." }`
+
+Ожидается JSON с массивом номенклатуры:
+
+```json
+{
+  "items": [
+    {
+      "sku": "ABC-001",
+      "title": "Труба ПВХ 20мм",
+      "category": "Трубы",
+      "stock_qty": 12,
+      "price": 150.5,
+      "description": "Описание"
+    }
+  ]
+}
+```
+
+Можно отправлять массив напрямую, либо использовать ключ `items`/`catalog`.
+При ошибке валидации сервер возвращает `422` с `request_id` и `errors`; по `request_id` можно найти подробный stacktrace и список ошибок схемы в логах.
+
+Пример запроса:
+
+```bash
+curl -X POST http://localhost:8000/integrations/1c/catalog \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ваш_токен" \\
+  -d '{"items":[{"sku":"ABC-001","title":"Труба ПВХ 20мм","category":"Трубы","stock_qty":12,"price":150.5,"description":"Описание"}]}'
+```
+
+Минимальная схема модуля обмена в 1С:
+
+1. Сформируйте массив номенклатуры (`items`) с полями `sku`, `title`, `category`, `stock_qty`, `price`, `description`.
+2. Отправьте HTTP POST на адрес бота `http://<host>:8000/integrations/1c/catalog` (или `/onec/catalog`).
+3. Если настроен `ONE_C_WEBHOOK_TOKEN`, добавьте токен любым из способов: `Authorization: Bearer`, `X-1C-Token`, `X-Token` или `?token=`.
+4. Для регулярной отправки заведите регламентное задание в 1С (например, каждые 10 минут).
+
+### HTTP push: история заказов (для history-first)
+
+Эндпоинты:
+
+```
+POST /integrations/1c/orders
+POST /onec/orders
+POST /api/onec/orders
+```
+
+Поддерживается `org_external_id` (GUID из 1С) — приоритетно используется для поиска организации, чтобы не плодить дубликаты. Если `org_external_id` нет, будет использован `org_name`.
+
+Настройки в `.env` для push:
+
+```
+ONE_C_WEBHOOK_TOKEN=ваш_токен
+```
+
+> Логин/пароль и интервал используются только в pull‑режиме.
+
+### HTTP pull: бот → 1С
+
+Бот умеет забирать справочник номенклатуры и обновлять каталог каждые 10 минут.
+Ожидается JSON от 1С по адресу `${ONE_C_BASE_URL}/catalog` (без использования OData).
+
+Настройки в `.env` для pull:
+
+```
+ONE_C_ENABLED=true
+ONE_C_BASE_URL=https://ваш-1с-сервер
+ONE_C_USERNAME=логин
+ONE_C_PASSWORD=пароль
+ONE_C_SYNC_INTERVAL_MINUTES=10
+```
+
+Для ручного запуска pull‑синхронизации можно нажать кнопку в каталоге админ‑панели.
+
+## Systemd (автозапуск после перезагрузки)
+
+1. Создайте сервис:
+
+```bash
+sudo tee /etc/systemd/system/partner-m.service >/dev/null <<'EOF'
+[Unit]
+Description=Partner-M bot stack
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/bot
+ExecStart=/usr/bin/docker compose up -d --build
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+2. Включите и запустите сервис:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable partner-m
+sudo systemctl start partner-m
+```
+
+> Важно: замените `/opt/bot` на путь, где лежит репозиторий.
+
+## Автообновление (git pull + redeploy)
+
+1. Создайте скрипт обновления:
+
+```bash
+sudo tee /usr/local/bin/partner-m-update >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /opt/bot
+git pull --rebase
+docker compose up -d --build
+EOF
+sudo chmod +x /usr/local/bin/partner-m-update
+```
+
+2. Запускайте вручную:
+
+```bash
+sudo /usr/local/bin/partner-m-update
+```
+
+> Важно: замените `/opt/bot` на путь к вашему репозиторию.
+
+При необходимости можно добавить cron, например раз в ночь:
+
+```bash
+sudo crontab -e
+```
+
+И добавить:
+
+```
+0 3 * * * /usr/local/bin/partner-m-update >> /var/log/partner-m-update.log 2>&1
+```
+
+## Резервное копирование БД
+
+1. Сделайте дамп PostgreSQL:
+
+```bash
+mkdir -p ~/partner-m-backups
+docker compose exec -T db pg_dump -U bot bot > ~/partner-m-backups/partner-m-$(date +%F).sql
+```
+
+2. Проверьте, что файл создан:
+
+```bash
+ls -lh ~/partner-m-backups
+```
+
+3. (Опционально) ежедневный бэкап через cron:
+
+```bash
+sudo crontab -e
+```
+
+```
+0 2 * * * mkdir -p /var/backups/partner-m && docker compose exec -T db pg_dump -U bot bot > /var/backups/partner-m/partner-m-$(date +\%F).sql
+```
+
+## Восстановление БД из бэкапа
+
+```bash
+cat /var/backups/partner-m/partner-m-YYYY-MM-DD.sql | docker compose exec -T db psql -U bot bot
+```
+
+## Request Handler (MVP)
+
+Минимальный обработчик запросов без БД/поиска/сети. Принимает текст и возвращает
+структурированный результат с интентами, состоянием и разобранными позициями.
+
+Пример:
+
+```json
+{
+  "intents": [
+    { "name": "order.add", "confidence": 0.8 }
+  ],
+  "state": "S5_DRAFT",
+  "items": [
+    {
+      "raw": "саморез 4х25 -4т.шт жёлтый",
+      "normalized": "саморез 4x25 жёлтый",
+      "qty": 4000,
+      "unit": "шт",
+      "attributes": {
+        "size": "4x25",
+        "color": "жёлтый",
+        "code": null,
+        "din": null,
+        "notes": null
+      },
+      "confidence": 0.6
+    }
+  ],
+  "need_clarification": [],
+  "context_updates": {
+    "last_items": [
+      { "raw": "саморез 4х25 -4т.шт жёлтый", "normalized": "саморез 4x25 жёлтый" }
+    ],
+    "topic": "order"
+  }
+}
+```
+
+
+## Admin Telegram org switch + request mode
+
+- Set admin telegram IDs via `ADMIN_USER_IDS` (CSV) in `.env`.
+- In Telegram, admin can run `/org` to view/select debug organization for search-as flow.
+- Selected org is persisted in Redis key `tg:debug_org:{telegram_user_id}` and used by bot search pipeline calls.
+- Main menu now contains `Отправить заявку` button.
+- In request mode you can:
+  - create/send request text,
+  - open active orders list (`Добавить в заказ`),
+  - for admins: `Сменить организацию`,
+  - exit mode (`Выйти`).
+- Clarification UI keeps inline paging and edits existing message (no chat spam).
+- Request mode is mobile-first: bot keeps two cards only (ResultsCard + ControlCard) and updates them via message edits.

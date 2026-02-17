@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Search Aliases</title>
+</head>
+<body>
+  <h1>Search aliases</h1>
+
+  <form action="/admin/search-aliases" method="get">
+    <label>Org ID: <input type="text" name="org_id" value="{{ org_id or '' }}" /></label>
+    <button type="submit">Фильтр</button>
+  </form>
+
+  <h2>Добавить алиас</h2>
+  <form action="/admin/search-aliases" method="post">
+    <label>Org ID (optional): <input type="text" name="org_id" value="{{ org_id or '' }}" /></label><br/>
+    <label>src: <input type="text" name="src" /></label><br/>
+    <label>dst: <input type="text" name="dst" /></label><br/>
+    <label><input type="checkbox" name="enabled" checked /> enabled</label><br/>
+    <button type="submit">Сохранить</button>
+  </form>
+
+  <h2>Список</h2>
+  <table border="1" cellpadding="6">
+    <tr><th>ID</th><th>org_id</th><th>src</th><th>dst</th><th>enabled</th><th>actions</th></tr>
+    {% for a in aliases %}
+      <tr>
+        <td>{{ a.id }}</td>
+        <td>{{ a.org_id if a.org_id is not none else 'global' }}</td>
+        <td>{{ a.src }}</td>
+        <td>{{ a.dst }}</td>
+        <td>{{ a.enabled }}</td>
+        <td>
+          <form action="/admin/search-aliases/{{ a.id }}/toggle" method="post" style="display:inline-block;">
+            <button type="submit">toggle</button>
+          </form>
+          <form action="/admin/search-aliases/{{ a.id }}/delete" method="post" style="display:inline-block;">
+            <button type="submit">delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+
+  <a href="/admin">Назад</a>
+</body>
+</html>

@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import OrgProductStats
+from app.services.search import search_products
+
+async def count_org_candidates(session: AsyncSession, org_id: int) -> int:
+    result = await session.execute(
+        select(func.count()).select_from(OrgProductStats).where(OrgProductStats.org_id == org_id)
+    )
+    return int(result.scalar() or 0)
+
+
+async def get_org_candidates(session: AsyncSession, org_id: int, limit: int | None = 200) -> list[int]:
+    query = (
+        select(OrgProductStats.product_id)
+        .where(OrgProductStats.org_id == org_id)
+        .order_by(desc(OrgProductStats.orders_count), desc(OrgProductStats.last_order_at))
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    result = await session.execute(query)
+    return [row[0] for row in result.all()]
+
+
+async def search_history_products(
+    session: AsyncSession,
+    org_id: int,
+    query: str,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    product_ids = await get_org_candidates(session, org_id, limit=limit)
+    if not product_ids:
+        return []
+    return await search_products(
+        session,
+        query,
+        limit=10,
+        product_ids=product_ids,
+    )
+
+
+async def upsert_org_product_stats(
+    session: AsyncSession,
+    org_id: int,
+    items: list[dict[str, Any]],
+) -> None:
+    for item in items:
+        product_id = int(item["product_id"])
+        qty = float(item.get("qty") or 0)
+        unit = item.get("unit")
+        ordered_at = item.get("ordered_at")
+        result = await session.execute(
+            select(OrgProductStats)
+            .where(OrgProductStats.org_id == org_id)
+            .where(OrgProductStats.product_id == product_id)
+        )
+        stats = result.scalar_one_or_none()
+        if stats:
+            stats.orders_count += 1
+            stats.qty_sum = float(stats.qty_sum or 0) + qty
+            if ordered_at and (stats.last_order_at is None or ordered_at >= stats.last_order_at):
+                stats.last_order_at = ordered_at
+                stats.last_qty = qty
+                stats.last_unit = unit
+        else:
+            stats = OrgProductStats(
+                org_id=org_id,
+                product_id=product_id,
+                orders_count=1,
+                qty_sum=qty,
+                last_order_at=ordered_at,
+                last_qty=qty if ordered_at else None,
+                last_unit=unit if ordered_at else None,
+            )
+            session.add(stats)
+    await session.flush()
