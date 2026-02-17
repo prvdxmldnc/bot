@@ -1,21 +1,34 @@
 from datetime import datetime
 from typing import Any
 import inspect
+import time
+from uuid import uuid4
 
 import hashlib
 import logging
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session
-from app.models import OrgMember, Organization, Product, User
+from app.models import Category, OrgMember, Organization, Product, User
 from app.services.history_candidates import upsert_org_product_stats
 from app.services.one_c import upsert_catalog
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class OneCCatalogCompatPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    items: list[dict[str, Any]] | None = None
+    catalog: list[dict[str, Any]] | None = None
+    categories: list[dict[str, Any]] | None = None
+    products: list[dict[str, Any]] | None = None
+    price_type: str | None = None
 
 
 def _extract_token(
@@ -46,6 +59,142 @@ def _extract_items(payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload.get("catalog"), list):
             return payload["catalog"]
     raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid payload")
+
+
+def _safe_jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool, list, dict)):
+        return value
+    return str(value)
+
+
+def _payload_overview(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, list):
+        return {"kind": "list", "len": len(payload)}
+    if not isinstance(payload, dict):
+        return {"kind": type(payload).__name__}
+    return {
+        "kind": "dict",
+        "keys": sorted(payload.keys()),
+        "categories": len(payload.get("categories") or []) if isinstance(payload.get("categories"), list) else None,
+        "products": len(payload.get("products") or []) if isinstance(payload.get("products"), list) else None,
+        "items": len(payload.get("items") or []) if isinstance(payload.get("items"), list) else None,
+        "catalog": len(payload.get("catalog") or []) if isinstance(payload.get("catalog"), list) else None,
+    }
+
+
+def _invalid_payload_http(request_id: str, errors: list[dict[str, Any]], message: str = "Invalid payload") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={"detail": message, "errors": errors, "request_id": request_id},
+    )
+
+
+async def _prepare_catalog_items(
+    session: AsyncSession,
+    payload: Any,
+    request_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    stats = {
+        "categories_received": 0,
+        "categories_upserted": 0,
+        "products_received": 0,
+        "products_skipped_missing_category": 0,
+        "products_skipped_invalid": 0,
+    }
+    try:
+        parsed = OneCCatalogCompatPayload.model_validate(payload)
+    except ValidationError as exc:
+        logger.exception(
+            "1C catalog payload validation failed",
+            extra={"request_id": request_id, "errors": exc.errors(), "payload": _payload_overview(payload)},
+        )
+        raise _invalid_payload_http(request_id, errors=[_safe_jsonable(e) for e in exc.errors()])
+
+    if parsed.items is not None or parsed.catalog is not None or isinstance(payload, list):
+        raw_items = _extract_items(payload)
+        stats["products_received"] = len(raw_items)
+        return raw_items, stats
+
+    if parsed.categories is None and parsed.products is None:
+        errors = [
+            {
+                "loc": ["body"],
+                "msg": "expected one of: items/catalog or categories+products",
+                "type": "value_error",
+            }
+        ]
+        raise _invalid_payload_http(request_id, errors=errors)
+
+    categories = parsed.categories or []
+    products = parsed.products or []
+    stats["categories_received"] = len(categories)
+    stats["products_received"] = len(products)
+
+    category_by_external: dict[str, Category] = {}
+    category_by_title: dict[str, Category] = {}
+
+    for entry in categories:
+        if not isinstance(entry, dict):
+            stats["products_skipped_invalid"] += 1
+            continue
+        title_ru = _coerce_str(entry.get("title_ru") or entry.get("title"))
+        title_lat = _coerce_str(entry.get("title_lat")) or None
+        if not title_ru:
+            continue
+        result = await session.execute(select(Category).where(Category.title_ru == title_ru))
+        category = result.scalar_one_or_none()
+        created = False
+        if not category:
+            category = Category(title_ru=title_ru[:255], title_lat=title_lat, order_index=int(_coerce_float(entry.get("order_index"))))
+            session.add(category)
+            await session.flush()
+            created = True
+        else:
+            if title_lat:
+                category.title_lat = title_lat
+        ext = _coerce_str(entry.get("external_id"))
+        if ext:
+            category_by_external[ext] = category
+        category_by_title[title_ru] = category
+        if created:
+            stats["categories_upserted"] += 1
+
+    normalized_items: list[dict[str, Any]] = []
+    for entry in products:
+        if not isinstance(entry, dict):
+            stats["products_skipped_invalid"] += 1
+            continue
+        category_external_id = _coerce_str(entry.get("category_external_id") or entry.get("category_external"))
+        category_title = _coerce_str(entry.get("category") or entry.get("category_title"))
+        category = None
+        if category_external_id:
+            category = category_by_external.get(category_external_id)
+        if not category and category_title:
+            category = category_by_title.get(category_title)
+        if not category:
+            stats["products_skipped_missing_category"] += 1
+            continue
+
+        title = _coerce_str(entry.get("title_ru") or entry.get("title") or entry.get("name"))
+        if not title:
+            stats["products_skipped_invalid"] += 1
+            continue
+        normalized_items.append(
+            {
+                "id": _coerce_str(entry.get("external_id")) or None,
+                "sku": _coerce_str(entry.get("sku")) or None,
+                "title": title,
+                "title_lat": _coerce_str(entry.get("title_lat")) or None,
+                "category": category.title_ru,
+                "price": _coerce_float(entry.get("price")),
+                "stock_qty": _coerce_float(entry.get("stock_qty")),
+                "description": _coerce_str(entry.get("description") or ""),
+            }
+        )
+
+    return normalized_items, stats
 
 
 def _coerce_str(value: Any) -> str:
@@ -387,30 +536,59 @@ async def one_c_catalog(
     x_token_header: str | None = Header(default=None, alias="X-Token"),
     token_query: str | None = Query(default=None, alias="token"),
 ) -> dict[str, Any]:
+    request_id = str(uuid4())
+    started_at = time.perf_counter()
     if settings.one_c_webhook_token:
         provided_token = _extract_token(authorization, token_header, x_token_header, token_query)
         if provided_token != settings.one_c_webhook_token:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    raw_items = _extract_items(payload)
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"detail": "Invalid token", "request_id": request_id})
+    try:
+        raw_items, stats = await _prepare_catalog_items(session, payload, request_id)
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        logger.exception(
+            "1C catalog payload invalid",
+            extra={"request_id": request_id, "errors": exc.errors(), "payload": _payload_overview(payload)},
+        )
+        raise _invalid_payload_http(request_id, errors=[_safe_jsonable(e) for e in exc.errors()])
+    except Exception:
+        logger.exception("1C catalog payload parsing failed", extra={"request_id": request_id, "payload": _payload_overview(payload)})
+        raise _invalid_payload_http(
+            request_id,
+            errors=[{"loc": ["body"], "msg": "unexpected parser error", "type": "value_error"}],
+        )
+
     items, skipped, sku_adjusted = _normalize_items(raw_items)
+    stats["products_skipped_invalid"] += skipped
     try:
         updated = await upsert_catalog(session, items)
-    except Exception as exc:
-        logger.exception("1C webhook upsert failed")
+    except Exception:
+        logger.exception("1C webhook upsert failed", extra={"request_id": request_id})
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Upsert failed: {exc.__class__.__name__}",
+            detail={"detail": "Upsert failed", "request_id": request_id},
         )
+
+    total_time_ms = int((time.perf_counter() - started_at) * 1000)
+    summary = {
+        "categories_received": stats.get("categories_received", 0),
+        "categories_upserted": stats.get("categories_upserted", 0),
+        "products_received": stats.get("products_received", len(raw_items)),
+        "products_upserted": updated,
+        "products_skipped_missing_category": stats.get("products_skipped_missing_category", 0),
+        "products_skipped_invalid": stats.get("products_skipped_invalid", 0),
+        "total_time_ms": total_time_ms,
+    }
     logger.info(
         "1C webhook processed",
         extra={
-            "received": len(raw_items),
-            "upserted": updated,
-            "skipped": skipped,
+            "request_id": request_id,
+            **summary,
             "sku_adjusted": sku_adjusted,
         },
     )
-    return {"ok": True, "received": len(raw_items), "upserted": updated, "skipped": skipped}
+    return {"ok": True, **summary, "request_id": request_id}
 
 
 @router.post("/integrations/1c/orders")

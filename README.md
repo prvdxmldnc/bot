@@ -116,11 +116,25 @@ POST /api/onec/catalog
 - `X-1C-Token: <token>`
 - `X-Token: <token>`
 - query-параметр `?token=<token>`
-HTTP push сразу пишет в БД через `upsert_catalog`, а ответ возвращает:
+HTTP push сразу пишет в БД через `upsert_catalog`, логирует `request_id` и возвращает summary:
 
 ```json
-{"ok": true, "received": 1, "upserted": 1, "skipped": 0}
+{
+  "ok": true,
+  "categories_received": 1,
+  "categories_upserted": 1,
+  "products_received": 10,
+  "products_upserted": 9,
+  "products_skipped_missing_category": 1,
+  "products_skipped_invalid": 0,
+  "total_time_ms": 124,
+  "request_id": "uuid"
+}
 ```
+
+Поддерживаются **оба формата** payload:
+- legacy: массив или `{ "items": [...] }` / `{ "catalog": [...] }`
+- 1С-формат: `{ "categories": [...], "products": [...], "price_type": "..." }`
 
 Ожидается JSON с массивом номенклатуры:
 
@@ -140,6 +154,7 @@ HTTP push сразу пишет в БД через `upsert_catalog`, а отве
 ```
 
 Можно отправлять массив напрямую, либо использовать ключ `items`/`catalog`.
+При ошибке валидации сервер возвращает `422` с `request_id` и `errors`; по `request_id` можно найти подробный stacktrace и список ошибок схемы в логах.
 
 Пример запроса:
 
