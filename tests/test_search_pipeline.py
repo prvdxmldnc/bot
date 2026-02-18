@@ -416,3 +416,27 @@ def test_synonym_trace_contains_retry_fields(monkeypatch):
     assert "synonym_map" in payload["decision"]
     assert "query_retry" in payload["decision"]
     assert "retry_results_count" in payload["decision"]
+
+
+def test_color_facet_conflict_returns_clarification(monkeypatch):
+    async def fake_search(_session, query, limit=5, category_ids=None, product_ids=None):
+        if query.startswith("спанбонд"):
+            return [
+                {"id": 1, "title_ru": "Спанбонд 70 беж", "sku": "SB-B"},
+                {"id": 2, "title_ru": "Спанбонд 70 коричневый", "sku": "SB-K"},
+            ]
+        return []
+
+    monkeypatch.setattr(search_pipeline, "search_products", fake_search)
+    monkeypatch.setattr(search_pipeline, "find_org_alias_candidates", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "search_history_products", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(search_pipeline, "count_org_candidates", _count_zero)
+    monkeypatch.setattr(search_pipeline, "parse_order_text", lambda q: [{"query": q, "raw": q, "query_core": q}])
+    monkeypatch.setattr(search_pipeline, "handle_message", lambda *args, **kwargs: types.SimpleNamespace(items=[]))
+    monkeypatch.setattr(settings, "llm_enabled", False)
+
+    payload = asyncio.run(search_pipeline.run_search_pipeline(DummySession(), org_id=42, user_id=None, text="спандбонд 70 белый"))
+
+    assert payload["decision"]["decision"] == "needs_clarification"
+    assert payload["decision"]["clarification"]["reason"] == "facet_conflict"
+    assert payload["decision"]["clarification"]["options"]
